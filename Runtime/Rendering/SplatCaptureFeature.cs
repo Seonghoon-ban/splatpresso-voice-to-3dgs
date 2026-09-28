@@ -405,6 +405,7 @@ namespace SplatPresso.Rendering
                 verticalFovDeg = cam.fieldOfView,
                 nearPlane = cam.nearClipPlane,
                 farPlane = cam.farClipPlane,
+                orthographic = req.orthographic,
             };
 
             if (cameraData.xrRendering)

@@ -124,21 +124,51 @@ namespace SplatPresso.EditorTools
         {
             var gs = PackageInfo.FindForPackageName("org.nesnausk.gaussian-splatting");
             if (gs != null)
-                r.Add(ValidationSeverity.Ok, $"Gaussian Splatting {gs.version} ({gs.source})");
+            {
+                var v = ParseVersion(gs.version);
+                if (v != null && v < kMinGsVersion)
+                    r.Add(ValidationSeverity.Error, $"Gaussian Splatting {gs.version} ({gs.source}) is too old: SplatPresso needs {kMinGsVersion} or newer " +
+                                                    "(URP Render Graph support). Update it (SplatPresso > Install or Repair Dependencies).");
+                else if (v != null && v >= kMaxGsVersionExclusive)
+                    r.Add(ValidationSeverity.Warning, $"Gaussian Splatting {gs.version} ({gs.source}) is newer than SplatPresso was made for " +
+                                                      $"(below {kMaxGsVersionExclusive}); it is untested.");
+                else
+                    r.Add(ValidationSeverity.Ok, $"Gaussian Splatting {gs.version} ({gs.source})");
+            }
             if (!GsInternals.Validate(out string gsError))
                 r.Add(ValidationSeverity.Error, gsError);
             if (UrpRendererUtil.GsUrpFeatureType == null)
                 r.Add(ValidationSeverity.Error, "GaussianSplatting.Runtime.GaussianSplatURPFeature not found. Gaussian Splatting compiles its URP support " +
                                                 "only when URP is installed; reinstall it (SplatPresso > Install or Repair Dependencies).");
+            else if (UrpRendererUtil.GsUrpFeatureSupportsRenderGraph() == false)
+                r.Add(ValidationSeverity.Error, "GaussianSplatURPFeature has no Render Graph path (Gaussian Splatting before 1.1.0), so no splats render " +
+                                                "with Render Graph on. Update Gaussian Splatting (SplatPresso > Install or Repair Dependencies).");
 #if SPLATPRESSO_HAS_GLTFAST
             r.Add(ValidationSeverity.Ok, "glTFast installed (Mesh representation available)");
 #else
             if (settings != null && settings.representation == ObjectRepresentation.Mesh)
-                r.Add(ValidationSeverity.Warning, "Representation is Mesh but glTFast is not installed; mesh objects will be skipped " +
-                                                  "(SplatPresso > Install or Repair Dependencies).");
+                r.Add(ValidationSeverity.Warning, "Representation is Mesh but glTFast is not installed; Mesh runs fail at start (nothing is generated) " +
+                                                  "until it is installed (SplatPresso > Install or Repair Dependencies).");
             else
                 r.Add(ValidationSeverity.Info, "glTFast not installed (only needed for Mesh representation)");
 #endif
+        }
+
+        // Supported Gaussian Splatting range [1.1.0, 2.0.0); same as the bootstrap's DependencyInstaller check.
+        static readonly Version kMinGsVersion = new Version(1, 1, 0);
+        static readonly Version kMaxGsVersionExclusive = new Version(2, 0, 0);
+
+        // "1.1.1-preview" -> 1.1.1 (suffix ignored); null when unparseable.
+        static Version ParseVersion(string version)
+        {
+            if (string.IsNullOrEmpty(version))
+                return null;
+            int cut = version.IndexOfAny(new[] { '-', '+' });
+            if (cut >= 0)
+                version = version.Substring(0, cut);
+            if (!Version.TryParse(version.Trim(), out var v))
+                return null;
+            return new Version(v.Major, v.Minor, Math.Max(0, v.Build));
         }
 
         static bool CheckPipelines(ValidationReport r)

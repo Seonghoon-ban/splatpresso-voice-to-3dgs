@@ -37,6 +37,14 @@ namespace SplatPresso.Api
         /// <summary>The chat/completions URL this client posts to.</summary>
         public string ChatUrl => SplatPressoSettings.JoinUrl(m_BaseUrl, "chat/completions");
 
+        /// <summary>
+        /// Longest single wait honored for a 429 Retry-After (seconds). A per-minute limit asks for up to 60 s; the
+        /// waits of one call are also capped by its timeoutSec. A 429 asking for longer fails right away as
+        /// <see cref="GenpressoErrorKind.RateLimited"/> (with <see cref="GenpressoException.RetryAfterSec"/>).
+        /// Interactive callers (voice turns) may lower it.
+        /// </summary>
+        public float MaxRateLimitWaitSec { get; set; } = 60f;
+
         sealed class CallState
         {
             public string model;
@@ -224,18 +232,33 @@ namespace SplatPresso.Api
 
             var headers = new Dictionary<string, string> { { "Authorization", "Bearer " + m_ApiKey.Trim() } };
             HttpResponse resp;
+            float rateLimitWaited = 0f;
             for (int attempt = 0; ; attempt++)
             {
                 resp = await HttpJson.SendAsync("POST", ChatUrl, bytes, "application/json", headers, timeoutSec, ct, throwOnHttpError: false);
                 if (resp.IsSuccess)
                     break;
-                // Per-minute limits (429) and gateway hiccups (502/503/504) are worth a short wait; the request was
-                // not processed, so nothing is billed twice. Other failures go straight to the caller.
+                // Per-minute limits (429) and gateway hiccups (502/503/504) are worth a wait; the request was not
+                // processed, so nothing is billed twice. Other failures go straight to the caller.
                 long code = resp.StatusCode;
                 bool transient = code == 429 || code == 502 || code == 503 || code == 504;
                 if (!transient || attempt >= kMaxTransientRetries)
                     throw GenpressoException.FromHttp($"GenPresso chat ({model})", code, resp.Text, resp.Error, resp.RetryAfterSec);
-                float delay = resp.RetryAfterSec > 0f ? Mathf.Min(resp.RetryAfterSec, 10f) : 1.5f * (attempt + 1);
+                float delay;
+                if (code == 429)
+                {
+                    // Honor the server's Retry-After (retrying sooner only burns attempts), within this call's budget.
+                    delay = resp.RetryAfterSec > 0f ? resp.RetryAfterSec : 5f * (attempt + 1);
+                    float allowed = Mathf.Min(Mathf.Max(0f, MaxRateLimitWaitSec), Mathf.Max(10f, timeoutSec) - rateLimitWaited);
+                    if (delay > allowed)
+                        throw GenpressoException.FromHttp($"GenPresso chat ({model}) is rate limited (asked to wait {delay:F0}s)",
+                            code, resp.Text, resp.Error, resp.RetryAfterSec);
+                    rateLimitWaited += delay;
+                }
+                else
+                {
+                    delay = resp.RetryAfterSec > 0f ? Mathf.Min(resp.RetryAfterSec, 10f) : 1.5f * (attempt + 1);
+                }
                 Debug.LogWarning($"[SplatPresso] GenPresso chat ({model}) returned HTTP {code}; retrying in {delay:F1}s");
                 await HttpJson.DelayAsync(delay, ct);
             }

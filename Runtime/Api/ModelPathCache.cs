@@ -10,7 +10,8 @@ namespace SplatPresso.Api
     /// <summary>
     /// Remembers which GenPresso media path answered for each capability, keyed by (apiBaseUrl, routeKey), in
     /// memory and in <c>&lt;persistentDataPath&gt;/SplatPresso/model_paths.json</c> with a 7-day TTL. A 404 during
-    /// real use invalidates the entry so the path is re-resolved.
+    /// real use invalidates the entry so the path is re-resolved; so does a change of the route's candidate list, and
+    /// a cached fallback (non-first) candidate is not kept alive by use, so the preferred candidate is retried weekly.
     /// </summary>
     public static class ModelPathCache
     {
@@ -21,6 +22,7 @@ namespace SplatPresso.Api
         {
             public string path;
             public string savedUtc; // ISO 8601
+            public string candidates; // the route's ordered candidate list when the path was cached (null = unknown)
         }
 
         static Dictionary<string, Entry> s_Entries;
@@ -46,14 +48,20 @@ namespace SplatPresso.Api
                 ? s_FilePathOverride
                 : Path.Combine(Application.persistentDataPath, "SplatPresso", "model_paths.json");
 
-        /// <summary>The cached path for a route, or null when unknown or expired.</summary>
-        public static string Get(string baseUrl, string routeKey)
+        /// <summary>
+        /// The cached path for a route, or null when unknown or expired. With <paramref name="candidates"/> (the
+        /// route's current ordered candidate list), an entry cached for a different list (reordered or edited in the
+        /// settings) is dropped, so the new order is resolved from the top.
+        /// </summary>
+        public static string Get(string baseUrl, string routeKey, IList<string> candidates = null)
         {
             var entries = Load();
             string key = Key(baseUrl, routeKey);
             if (!entries.TryGetValue(key, out var e) || e == null || string.IsNullOrEmpty(e.path))
                 return null;
-            if (IsExpired(e))
+            string signature = Signature(candidates);
+            bool listChanged = signature != null && e.candidates != null && !string.Equals(e.candidates, signature, StringComparison.Ordinal);
+            if (IsExpired(e) || listChanged)
             {
                 entries.Remove(key);
                 Save();
@@ -62,17 +70,40 @@ namespace SplatPresso.Api
             return e.path;
         }
 
-        /// <summary>Records the path that answered for a route.</summary>
-        public static void Set(string baseUrl, string routeKey, string path)
+        /// <summary>
+        /// Records the path that answered for a route. Pass the route's ordered <paramref name="candidates"/> so a
+        /// later reorder invalidates the entry. When the path is not the first (preferred) candidate, recording it
+        /// again does not refresh its age: it expires after <see cref="TimeToLive"/> and the preferred candidate
+        /// gets another chance (e.g. once GenPresso starts hosting it).
+        /// </summary>
+        public static void Set(string baseUrl, string routeKey, string path, IList<string> candidates = null)
         {
             if (string.IsNullOrEmpty(routeKey) || string.IsNullOrEmpty(path))
                 return;
             var entries = Load();
             string key = Key(baseUrl, routeKey);
+            string signature = Signature(candidates);
             if (entries.TryGetValue(key, out var existing) && existing != null &&
-                string.Equals(existing.path, path, StringComparison.Ordinal) && !IsExpired(existing, TimeSpan.FromDays(1)))
-                return; // fresh enough; avoid rewriting the file on every call
-            entries[key] = new Entry { path = path, savedUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) };
+                string.Equals(existing.path, path, StringComparison.Ordinal) && !IsExpired(existing))
+            {
+                bool sameList = signature == null || string.Equals(existing.candidates, signature, StringComparison.Ordinal);
+                bool preferred = candidates == null || candidates.Count == 0 ||
+                                 string.Equals((candidates[0] ?? "").Trim(), path.Trim(), StringComparison.OrdinalIgnoreCase);
+                if (!preferred)
+                {
+                    // a fallback candidate keeps its original age; only the list it belongs to is updated
+                    if (!sameList)
+                    {
+                        existing.candidates = signature;
+                        Save();
+                    }
+                    return;
+                }
+                if (sameList && !IsExpired(existing, TimeSpan.FromDays(1)))
+                    return; // fresh enough; avoid rewriting the file on every call
+                signature ??= existing.candidates;
+            }
+            entries[key] = new Entry { path = path, savedUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), candidates = signature };
             Save();
         }
 
@@ -105,6 +136,18 @@ namespace SplatPresso.Api
 
         static string Key(string baseUrl, string routeKey) =>
             (string.IsNullOrWhiteSpace(baseUrl) ? SplatPressoSettings.DefaultApiBaseUrl : baseUrl.Trim()).TrimEnd('/').ToLowerInvariant() + "|" + routeKey;
+
+        // Ordered, trimmed, case-folded candidate list (null when not given).
+        static string Signature(IList<string> candidates)
+        {
+            if (candidates == null)
+                return null;
+            var parts = new List<string>(candidates.Count);
+            foreach (var c in candidates)
+                if (!string.IsNullOrWhiteSpace(c))
+                    parts.Add(c.Trim().Trim('/').ToLowerInvariant());
+            return string.Join("|", parts);
+        }
 
         static bool IsExpired(Entry e) => IsExpired(e, TimeToLive);
 

@@ -288,8 +288,8 @@ namespace SplatPresso
         // File handling
 
         // Compares key names ignoring case and separators: genpresso_api_key == genpressoApiKey == GENPRESSO-API-KEY.
-        // Why: when a name was off by one character, the lookup silently returned null and the caller only saw
-        // "no key" (a file had supabaseUrl while the code looked for supabase_url, and a whole upload path broke).
+        // Why: when a key name was off by one separator (camelCase vs snake_case), the lookup silently returned null
+        // and the caller only saw "no key".
         static string Normalize(string k)
         {
             if (string.IsNullOrEmpty(k))
@@ -357,19 +357,34 @@ namespace SplatPresso
             cache = new FileKeys { path = path, exists = exists, lastWriteUtc = stamp, lastCheckUtc = now };
             if (!exists)
                 return cache;
+            // Never log e.Message here: Json.NET echoes offending values ("Error converting value \"gp_...\""),
+            // which would print a key that was written as a bare JSON string.
             try
             {
-                var raw = JsonConvert.DeserializeObject<Dictionary<string, object>>(File.ReadAllText(path));
+                string text = File.ReadAllText(path);
                 var values = new Dictionary<string, string>();
-                if (raw != null)
-                    foreach (var kv in raw)
-                        if (kv.Value != null)
-                            values[Normalize(kv.Key)] = kv.Value.ToString();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    var token = JToken.Parse(text);
+                    if (!(token is JObject obj))
+                    {
+                        Debug.LogWarning($"[SplatPresso] Could not read keys file {path}: the root must be a JSON object like " +
+                                         $"{{\"genpresso\":\"gp_...\"}} (found {token.Type}).");
+                        return cache;
+                    }
+                    foreach (var prop in obj.Properties())
+                        if (prop.Value != null && prop.Value.Type != JTokenType.Null)
+                            values[Normalize(prop.Name)] = prop.Value.Type == JTokenType.String ? (string)prop.Value : prop.Value.ToString();
+                }
                 cache.values = values;
+            }
+            catch (JsonReaderException e)
+            {
+                Debug.LogWarning($"[SplatPresso] Could not read keys file {path}: invalid JSON at line {e.LineNumber}, position {e.LinePosition}.");
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[SplatPresso] Could not read keys file {path}: {e.Message}");
+                Debug.LogWarning($"[SplatPresso] Could not read keys file {path} ({e.GetType().Name}).");
             }
             return cache;
         }
@@ -379,18 +394,28 @@ namespace SplatPresso
             string path = UserProfileKeysPath;
             if (!File.Exists(path))
                 return new JObject();
+            // Refuse to overwrite a file we cannot parse: it may hold other keys the user wants to keep. The messages
+            // never include the parser's text (it can echo key values).
+            JToken token;
             try
             {
-                var token = JToken.Parse(File.ReadAllText(path));
-                if (token is JObject obj)
-                    return obj;
+                string text = File.ReadAllText(path);
+                if (string.IsNullOrWhiteSpace(text))
+                    return new JObject();
+                token = JToken.Parse(text);
+            }
+            catch (JsonReaderException e)
+            {
+                throw new InvalidOperationException($"[SplatPresso] {path} is not valid JSON (line {e.LineNumber}, position {e.LinePosition}); fix or delete it first.", e);
             }
             catch (Exception e)
             {
-                // Refuse to overwrite a file we cannot parse: it may hold other keys the user wants to keep.
-                throw new InvalidOperationException($"[SplatPresso] {path} is not valid JSON ({e.Message}); fix or delete it first.", e);
+                throw new InvalidOperationException($"[SplatPresso] {path} could not be read ({e.GetType().Name}); fix or delete it first.", e);
             }
-            return new JObject();
+            if (token is JObject obj)
+                return obj;
+            throw new InvalidOperationException(
+                $"[SplatPresso] {path} must hold a JSON object like {{\"genpresso\":\"gp_...\"}} (found {token.Type}); fix or delete it first.");
         }
 
         static void WriteRawUserFile(JObject obj)
@@ -398,9 +423,52 @@ namespace SplatPresso
             string path = UserProfileKeysPath;
             string dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir))
+            {
                 Directory.CreateDirectory(dir);
+                // Close the default folder to other users BEFORE the key lands in it (also fixes a folder made by hand).
+                // An overridden path may live in a shared folder: only the file itself is restricted then.
+                if (string.IsNullOrEmpty(s_UserProfileKeysPathOverride))
+                    RestrictToOwner(dir, "700");
+            }
             File.WriteAllText(path, obj.ToString(Formatting.Indented));
+            RestrictToOwner(path, "600");
             Reset();
+        }
+
+        // keys.json holds secrets, but the default umask (022) leaves new files 0644 and folders 0755, readable by other
+        // local accounts on macOS/Linux. Windows user profiles are already private (ACLs), so nothing to do there.
+        // File.SetUnixFileMode is not available in Unity's profiles; /bin/chmod exists on both macOS and Linux.
+        static void RestrictToOwner(string target, string mode)
+        {
+            switch (Application.platform)
+            {
+                case RuntimePlatform.OSXEditor:
+                case RuntimePlatform.OSXPlayer:
+                case RuntimePlatform.OSXServer:
+                case RuntimePlatform.LinuxEditor:
+                case RuntimePlatform.LinuxPlayer:
+                case RuntimePlatform.LinuxServer:
+                    break;
+                default:
+                    return;
+            }
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("/bin/chmod", $"{mode} \"{target}\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    if (p != null && (!p.WaitForExit(2000) || p.ExitCode != 0))
+                        Debug.LogWarning($"[SplatPresso] Could not restrict access to {target}; run: chmod {mode} \"{target}\"");
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[SplatPresso] Could not restrict access to {target} ({e.GetType().Name}); run: chmod {mode} \"{target}\"");
+            }
         }
 
         static void RemoveAliases(JObject obj, ApiKeyKind kind)

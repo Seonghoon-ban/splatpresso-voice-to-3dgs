@@ -43,6 +43,22 @@ namespace SplatPresso.EditorTools
         public static Type GsUrpFeatureType =>
             TypeCache.GetTypesDerivedFrom<ScriptableRendererFeature>().FirstOrDefault(t => t.FullName == GsUrpFeatureTypeName);
 
+        /// <summary>
+        /// True when upstream's splat feature has a Render Graph path (one of its nested passes declares
+        /// <c>RecordRenderGraph</c>, added in Gaussian Splatting 1.1.0), false when it only implements the
+        /// compatibility-mode <c>Execute</c> (1.0.x renders nothing with Render Graph on), null when the type is missing.
+        /// </summary>
+        public static bool? GsUrpFeatureSupportsRenderGraph()
+        {
+            var type = GsUrpFeatureType;
+            if (type == null)
+                return null;
+            const BindingFlags declared = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            return type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
+                .Where(t => typeof(ScriptableRenderPass).IsAssignableFrom(t))
+                .Any(t => t.GetMethods(declared).Any(m => m.Name == "RecordRenderGraph"));
+        }
+
         /// <summary>The effective pipeline of every quality level.</summary>
         public static List<QualityLevelPipeline> GetQualityLevelPipelines()
         {

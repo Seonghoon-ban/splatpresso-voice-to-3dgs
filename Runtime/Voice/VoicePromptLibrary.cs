@@ -52,7 +52,7 @@ namespace SplatPresso.Voice
 
         /// <summary>
         /// The LANGUAGE RULE text. Auto follows the user's language; a fixed language uses the original
-        /// (field-tested) wording, which for Korean is exactly the rule the source study ran with.
+        /// field-tested wording.
         /// </summary>
         public static string LanguageRule(ReplyLanguage language, string fallbackLanguage)
         {
@@ -215,11 +215,22 @@ namespace SplatPresso.Voice
                 "contains an AUDIO clip of what they just said and usually an IMAGE of what they are looking at " +
                 "right now.\n");
             sb.Append("LANGUAGE RULE (highest priority): ").Append(LanguageRule(s)).Append('\n');
+            // The exact shape is spelled out (not just "matching the schema"): when the provider rejects or ignores
+            // response_format, this prompt is the only description of the format the model gets.
             sb.Append(
-                "OUTPUT: reply with exactly ONE JSON object matching the schema, nothing else.\n" +
+                "OUTPUT: reply with exactly ONE JSON object and nothing else (no prose, no code fences), with exactly " +
+                "these fields: {\"transcript\": \"...\", \"reply\": \"...\", \"actions\": [...]}.\n" +
                 "- transcript: exactly what the user said, in the language they spoke. If there is no intelligible " +
                 "speech, use \"\" and politely ask them to repeat; actions must be [].\n" +
-                "- reply: one or two short sentences, spoken style. Never read JSON, URLs or technical details aloud.\n");
+                "- reply: one or two short sentences, spoken style. Never read JSON, URLs or technical details aloud.\n" +
+                "- actions: usually []. Every action is a JSON object (never a plain string) with exactly the fields " +
+                "type, intent_summary, objects and placement_hint. A create action: {\"type\": \"create\", " +
+                "\"intent_summary\": \"<1-2 sentences describing what the user wants added, written for a vision model " +
+                "that sees the current view>\", \"objects\": [{\"name\": \"<short object name>\", \"description\": " +
+                "\"<color, material, style, rough size>\", \"count\": <1-" + VoiceRequestSanitizer.MaxCountPerObject +
+                ">}], \"placement_hint\": \"<where to place the object(s); 'anywhere sensible' if the user did not say>\"}" +
+                " - objects lists the distinct object types (at most " + VoiceRequestSanitizer.MaxObjectTypes + "). " +
+                "A cancel action: {\"type\": \"cancel\", \"intent_summary\": \"\", \"objects\": [], \"placement_hint\": \"\"}.\n");
             sb.Append(
                 "TYPED TURNS: some turns are typed instead of spoken; they have no audio. Treat the quoted typed " +
                 "text as what the user said and copy it verbatim into transcript.\n");
@@ -375,27 +386,48 @@ namespace SplatPresso.Voice
         }
 
         /// <summary>
-        /// History form of the assistant side: the reply and a one-line summary per action, so the model remembers
-        /// what it already requested (prevents duplicate creations).
+        /// History form of the assistant side: the reply and the actions it carried (cancel first, then the
+        /// sanitized creates), so the model remembers what it already requested (prevents duplicate creations).
+        /// Written in exactly the <c>voice_turn</c> reply shape: without an enforced schema the model imitates its
+        /// own history, and any other action format (e.g. a summary string) would not parse.
         /// </summary>
-        public static string HistoryAssistantText(string reply, IList<PlacementRequest> creates, bool cancel)
+        public static string HistoryAssistantText(string reply, IList<PlacementRequest> creates, bool cancel, string transcript = null)
         {
             var actions = new JArray();
             if (cancel)
-                actions.Add("cancel");
+            {
+                actions.Add(new JObject
+                {
+                    ["type"] = VoiceAction.TypeCancel,
+                    ["intent_summary"] = "",
+                    ["objects"] = new JArray(),
+                    ["placement_hint"] = "",
+                });
+            }
             if (creates != null)
             {
                 foreach (var r in creates)
                 {
                     if (r?.objects == null)
                         continue;
-                    var names = new List<string>();
+                    var objects = new JArray();
                     foreach (var o in r.objects)
-                        names.Add($"{o.name} x{o.count}");
-                    actions.Add($"create: {string.Join(", ", names)} @ '{r.placementHint}'");
+                    {
+                        if (o == null)
+                            continue;
+                        objects.Add(new JObject { ["name"] = o.name ?? "", ["description"] = o.description ?? "", ["count"] = o.count });
+                    }
+                    actions.Add(new JObject
+                    {
+                        ["type"] = VoiceAction.TypeCreate,
+                        ["intent_summary"] = r.intentSummary ?? "",
+                        ["objects"] = objects,
+                        ["placement_hint"] = r.placementHint ?? "",
+                    });
                 }
             }
-            return new JObject { ["reply"] = reply ?? "", ["actions"] = actions }.ToString(Newtonsoft.Json.Formatting.None);
+            return new JObject { ["transcript"] = transcript ?? "", ["reply"] = reply ?? "", ["actions"] = actions }
+                .ToString(Newtonsoft.Json.Formatting.None);
         }
 
         static void AppendNotices(StringBuilder sb, IList<string> notices)

@@ -169,6 +169,7 @@ namespace SplatPresso.Voice
                 catch (Exception e) { Debug.LogException(e); }
             }
             UpdatePushToTalk();
+            UpdateHandsFreeCapture();
         }
 
         // ------------------------------------------------------------------------------------------
@@ -330,6 +331,19 @@ namespace SplatPresso.Voice
                 Debug.Log($"[SplatPresso] Maximum utterance length ({Settings.maxUtteranceSeconds:F0}s) reached; sending the turn");
                 EndTalkInternal();
             }
+        }
+
+        // Hands-free: the microphone must stream for the whole connected session. A device switch or a
+        // reconfigure aborts the capture (MicCapture.Restart), and a start at connect time fails while no device
+        // exists yet; re-arm once the warm mic runs again. Gated on IsMicRunning so a missing device is not
+        // retried every frame (MicCapture retries in the background). While the socket is down IsAvailable is
+        // false, so this does not fight the backend's own CancelCapture on reconnect/close.
+        void UpdateHandsFreeCapture()
+        {
+            if (!IsHandsFree || m_Backend == null || !m_Backend.IsAvailable)
+                return;
+            if (mic != null && mic.isActiveAndEnabled && mic.IsMicRunning && !mic.IsCapturing)
+                mic.StartCapture();
         }
 
         bool PollTalkHeld()

@@ -215,6 +215,36 @@ namespace SplatPresso.Tests
         }
 
         [Test]
+        public void UserProfileFile_WithABareStringRoot_IsIgnoredWithoutLoggingTheKey()
+        {
+            // a key written as a bare JSON string: Json.NET's error text echoes the value, so it must never be logged
+            const string secret = "gp_BARESTRING_9999abcd";
+            var kinds = KindsWithoutEnvironment();
+            WriteKeysFile("\"" + secret + "\"");
+            var logged = new List<string>();
+            Application.LogCallback capture = (condition, stackTrace, type) => logged.Add(condition);
+            Application.logMessageReceived += capture;
+            try
+            {
+                ApiKeys.Get(kinds[0], out KeySource src);
+                Assert.AreNotEqual(KeySource.UserProfileFile, src);
+            }
+            finally
+            {
+                Application.logMessageReceived -= capture;
+            }
+            Assert.IsTrue(logged.Exists(m => m.Contains("root must be a JSON object")), "expected a warning; got: " + string.Join(" | ", logged));
+            foreach (var m in logged)
+                StringAssert.DoesNotContain("BARESTRING", m, "key values are never logged");
+            Assert.AreEqual("(none)", ApiKeys.LoadedKeyNames());
+
+            // and Save refuses to overwrite it rather than silently replacing it
+            var e = Assert.Throws<InvalidOperationException>(() => ApiKeys.SaveToUserProfile(ApiKeyKind.Fal, "fal-9999"));
+            StringAssert.DoesNotContain("BARESTRING", e.Message);
+            Assert.AreEqual("\"" + secret + "\"", File.ReadAllText(m_KeysPath));
+        }
+
+        [Test]
         public void Mask_HidesTheMiddleOfTheKey()
         {
             Assert.AreEqual("gp_****abcd", ApiKeys.Mask("gp_1234567890abcd"));

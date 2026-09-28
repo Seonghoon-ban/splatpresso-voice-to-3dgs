@@ -171,7 +171,8 @@ namespace SplatPresso.Api
             if (s.voiceBackend == VoiceBackendKind.OpenAIRealtime)
                 r.lines.Add("OpenAI key (Realtime voice): " + (r.hasOpenAIKey ? "present" : "MISSING"));
 
-            // 4. Optional media path probes (the first present candidate per route is cached).
+            // 4. Optional media path probes (the first present candidate per route is cached, unless a candidate
+            //    listed before it could not be checked).
             if (probeMediaModels && r.hasKey && r.reachable)
             {
                 r.lines.Add("Media model paths:");
@@ -180,7 +181,9 @@ namespace SplatPresso.Api
                     if (kv.Value == null)
                         continue;
                     bool resolved = false;
-                    foreach (var path in kv.Value.CleanPaths())
+                    bool earlierUnknown = false; // a higher-priority candidate could not be checked (429, 5xx, network...)
+                    var paths = kv.Value.CleanPaths();
+                    foreach (var path in paths)
                     {
                         ct.ThrowIfCancellationRequested();
                         var probe = await MediaJobClient.ProbeAsync(s, path, ct);
@@ -189,7 +192,16 @@ namespace SplatPresso.Api
                         if (probe.Present && !resolved)
                         {
                             resolved = true;
-                            ModelPathCache.Set(s.apiBaseUrl, kv.Key, probe.path);
+                            // Caching a lower-priority path because the preferred one was momentarily unreachable would
+                            // pin every later run to it; leave the route to be resolved by real use instead.
+                            if (earlierUnknown)
+                                r.lines.Add($"  {kv.Key}: not cached ('{probe.path}' answered, but a preferred candidate could not be checked)");
+                            else
+                                ModelPathCache.Set(s.apiBaseUrl, kv.Key, probe.path, paths);
+                        }
+                        else if (probe.outcome == ProbeOutcome.Error && !resolved)
+                        {
+                            earlierUnknown = true;
                         }
                     }
                     if (!resolved)

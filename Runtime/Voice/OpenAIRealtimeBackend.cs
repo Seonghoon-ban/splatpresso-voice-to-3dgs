@@ -22,6 +22,12 @@ namespace SplatPresso.Voice
         // PREVIOUS utterance instead).
         const float kTranscriptWaitSec = 2f;
         const int kMaxRememberedTranscripts = 16;
+        // Semantic VAD: a response deferred while the user spoke is normally covered by the response the server
+        // creates for the user's turn; if none has started this long after speech_stopped, it is sent after all.
+        const float kVadResponseGraceSec = 1.5f;
+        // Safety net: speech_stopped never arrives when the mic stops streaming mid-utterance (device lost); do not
+        // keep deferring responses / muting the agent forever.
+        const float kMaxVadSpeechSec = 30f;
 
         public event Action<string> UserTranscript;
         public event Action<string> AgentReply;
@@ -47,7 +53,10 @@ namespace SplatPresso.Voice
         bool m_CancelOnCreated;      // barge-in arrived before the requested response was created
         bool m_TurnResponsePending;  // a user turn needs a response once the current one ends (never dropped)
         bool m_NarrationPending;     // a narration needs a response once possible (dropped on barge-in)
-        bool m_PttHeld;
+        bool m_PttHeld;              // push-to-talk held; NOT reset on reconnect (the hold is still in progress)
+        bool m_UserSpeaking;         // semantic VAD: speech_started received, speech_stopped not yet
+        float m_SpeechStartedAt;
+        float m_SpeechStoppedAt = -999f;
 
         // per session (L3: reset on every session.created, including after a reconnect)
         bool m_FrameSendUnsupported;
@@ -91,6 +100,9 @@ namespace SplatPresso.Voice
         SplatPressoSettings Settings => m_Ctx?.settings != null ? m_Ctx.settings : SplatPressoSettings.Active;
         bool VadMode => Settings.useSemanticVad;
         bool IsConnected => m_Socket != null && m_Socket.IsConnected;
+        // the user is talking (push-to-talk held, or semantic VAD heard speech): do not start or play a response
+        // (m_PttHeld is ignored in VAD mode, where push-to-talk is off and nothing would release it)
+        bool UserTalking => (m_PttHeld && !VadMode) || m_UserSpeaking;
 
         // ------------------------------------------------------------------------------------------
         // lifecycle
@@ -101,6 +113,7 @@ namespace SplatPresso.Voice
             m_Epoch++;
             m_StartError = null;
             ResetResponseState();
+            m_PttHeld = false;
 
             string key = ApiKeys.Get(ApiKeyKind.OpenAI);
             if (string.IsNullOrWhiteSpace(key))
@@ -142,6 +155,7 @@ namespace SplatPresso.Voice
                 m_Ctx.mic.CancelCapture();
             m_Ctx?.player?.Flush();
             ResetResponseState();
+            m_PttHeld = false;
         }
 
         /// <summary>Aborts the socket immediately (no close handshake), then stops like <see cref="Stop"/>.</summary>
@@ -162,10 +176,22 @@ namespace SplatPresso.Voice
             m_Socket?.Tick();
 
             float now = Time.unscaledTime;
+            if (m_UserSpeaking && now - m_SpeechStartedAt > kMaxVadSpeechSec)
+            {
+                Debug.LogWarning("[SplatPresso] Realtime: no speech_stopped after a long time; no longer holding responses back");
+                EndUserSpeech();
+            }
             if (m_ResponseRequested && now - m_RequestedAt > kResponseRequestTimeoutSec)
             {
                 Debug.LogWarning("[SplatPresso] Realtime: no response.created for a requested response; clearing the in-flight flag");
                 m_ResponseRequested = false;
+                m_CancelOnCreated = false; // it was meant for that response, not for the user's next one
+                MaybeSendPendingResponse();
+            }
+            else if (VadMode && !m_UserSpeaking && (m_TurnResponsePending || m_NarrationPending) && !IsBusy &&
+                     now - m_SpeechStoppedAt > kVadResponseGraceSec)
+            {
+                // deferred while the user spoke, and the server started no response for the turn
                 MaybeSendPendingResponse();
             }
 
@@ -189,7 +215,17 @@ namespace SplatPresso.Voice
             m_CancelOnCreated = false;
             m_TurnResponsePending = false;
             m_NarrationPending = false;
-            m_PttHeld = false;
+            m_UserSpeaking = false;
+            // m_PttHeld is not reset here: after a reconnect the user may still hold the key (OnTalkReleased,
+            // Start and Stop clear it)
+        }
+
+        void EndUserSpeech()
+        {
+            if (!m_UserSpeaking)
+                return;
+            m_UserSpeaking = false;
+            m_SpeechStoppedAt = Time.unscaledTime;
         }
 
         // ------------------------------------------------------------------------------------------
@@ -323,14 +359,15 @@ namespace SplatPresso.Voice
             m_Ctx?.player?.Flush();
         }
 
-        // Sends response.create unless one is already in flight or the user holds push-to-talk; then it is
-        // deferred and sent when possible (only one response may be active at a time; the release of a held
-        // push-to-talk creates the response that covers a deferred turn).
+        // Sends response.create unless one is already in flight or the user is talking (push-to-talk held, or
+        // semantic VAD heard speech); then it is deferred and sent when possible (only one response may be active
+        // at a time; the release of a held push-to-talk, or the server's response to a VAD turn, covers a
+        // deferred turn).
         void RequestResponse(bool isUserTurn)
         {
             if (!IsConnected)
                 return;
-            if (IsBusy || m_PttHeld)
+            if (IsBusy || UserTalking)
             {
                 if (isUserTurn)
                     m_TurnResponsePending = true;
@@ -343,6 +380,9 @@ namespace SplatPresso.Voice
 
         void SendResponseCreate()
         {
+            // only called when nothing is in flight: a leftover cancel-on-created flag is stale and would cancel
+            // this new response (e.g. the user's own turn) the moment it starts
+            m_CancelOnCreated = false;
             string id = "sp_resp_" + (++m_EventCounter);
             Send(RealtimeProtocol.ResponseCreate(id));
             m_ResponseRequested = true;
@@ -351,12 +391,12 @@ namespace SplatPresso.Voice
             m_TurnResponsePending = false; // this response answers the pending turn as well
         }
 
-        // Called when nothing is in flight any more. Never flushes while push-to-talk is held: the done may belong
-        // to the response the user just cancelled, and responding then talks over the user's turn (responses pile
-        // up, the conversation tangles, tools get re-called).
+        // Called when nothing is in flight any more. Never flushes while the user is talking (push-to-talk held or
+        // VAD speech): the done may belong to the response the user just cancelled, and responding then talks over
+        // the user's turn (responses pile up, the conversation tangles, tools get re-called).
         void MaybeSendPendingResponse()
         {
-            if (!IsConnected || IsBusy || m_PttHeld)
+            if (!IsConnected || IsBusy || UserTalking)
                 return;
             if (m_TurnResponsePending || m_NarrationPending)
             {
@@ -445,17 +485,27 @@ namespace SplatPresso.Voice
                 }
 
                 case RealtimeEventNames.ResponseCreated:
+                {
+                    bool requestedByUs = m_ResponseRequested;
                     m_ResponseActive = true;
                     m_ResponseRequested = false;
                     AudioBytesThisResponse = 0;
-                    if (m_CancelOnCreated || m_PttHeld)
+                    if (m_CancelOnCreated || UserTalking)
                     {
                         // the user started talking before this response began: do not talk over them
                         m_CancelOnCreated = false;
                         Send(RealtimeProtocol.ResponseCancel());
                         m_Ctx?.player?.Flush();
                     }
+                    else if (!requestedByUs && VadMode)
+                    {
+                        // semantic VAD created this response for the user's turn; the items of a deferred
+                        // narration / tool follow-up are already in the conversation, so it covers them too
+                        m_TurnResponsePending = false;
+                        m_NarrationPending = false;
+                    }
                     break;
+                }
 
                 case RealtimeEventNames.ResponseDone:
                 {
@@ -472,7 +522,7 @@ namespace SplatPresso.Voice
                 case RealtimeEventNames.ResponseAudioDeltaLegacy:
                 {
                     string delta = (string)e["delta"];
-                    if (!string.IsNullOrEmpty(delta) && !m_PttHeld)
+                    if (!string.IsNullOrEmpty(delta) && !UserTalking)
                     {
                         m_Ctx?.player?.EnqueueBase64Pcm16(delta);
                         AudioBytesThisResponse += delta.Length;
@@ -481,11 +531,23 @@ namespace SplatPresso.Voice
                 }
 
                 case RealtimeEventNames.InputAudioBufferSpeechStarted:
-                    // semantic VAD barge-in: the server cancels its response; kill local playback
+                    // semantic VAD barge-in: the server cancels its response; kill local playback. Until
+                    // speech_stopped, narration and tool follow-ups are deferred (not spoken over the user).
+                    if (VadMode)
+                    {
+                        m_UserSpeaking = true;
+                        m_SpeechStartedAt = Time.unscaledTime;
+                    }
                     m_Ctx?.player?.Flush();
                     break;
 
+                case RealtimeEventNames.InputAudioBufferSpeechStopped:
+                case RealtimeEventNames.InputAudioBufferCleared:
+                    EndUserSpeech();
+                    break;
+
                 case RealtimeEventNames.InputAudioBufferCommitted:
+                    EndUserSpeech();
                     m_TurnItemId = (string)e["item_id"];
                     m_TurnTypedText = null;
                     break;
@@ -526,8 +588,6 @@ namespace SplatPresso.Voice
                 case RealtimeEventNames.ResponseAudioTranscriptDeltaLegacy:
                 case RealtimeEventNames.ResponseFunctionCallArgumentsDelta:
                 case RealtimeEventNames.ResponseFunctionCallArgumentsDone:
-                case RealtimeEventNames.InputAudioBufferSpeechStopped:
-                case RealtimeEventNames.InputAudioBufferCleared:
                 case RealtimeEventNames.ConversationItemCreated:
                 case RealtimeEventNames.ConversationItemAdded:
                 case RealtimeEventNames.ConversationItemDone:
@@ -561,8 +621,10 @@ namespace SplatPresso.Voice
             }
             if (m_ResponseRequested && eventId != null && eventId == m_RequestedEventId)
             {
-                // our response.create was rejected: it is not in flight any more
+                // our response.create was rejected: it is not in flight any more (and a cancel queued for it
+                // must not hit the user's next response)
                 m_ResponseRequested = false;
+                m_CancelOnCreated = false;
                 MaybeSendPendingResponse();
             }
             if (code == "response_cancel_not_active")

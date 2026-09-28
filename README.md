@@ -72,6 +72,7 @@
 | Unity | **6000.0 이상** (0.1.0은 6000.0.63f1 / URP 17.0.4 / Windows D3D12에서 개발) |
 | 렌더 파이프라인 | **URP 17 + Render Graph** (Compatibility Mode 꺼짐). Built-in 프로젝트는 Setup이 URP 에셋을 만들어 줍니다. |
 | 그래픽 API | Windows **D3D12 / Vulkan**, macOS **Metal**. DX11·OpenGL에서는 스플랫이 렌더링되지 않습니다. |
+| Gaussian Splatting 렌더러 | **1.1.0 이상, 2.0 미만** (1.1.0은 Render Graph를 지원하는 첫 버전; 호환이 확인되지 않은 2.x는 안전하게 비활성화). 없으면 부트스트랩이 고정 커밋을 설치합니다(아래). |
 | Git | **2.14 이상이 PATH에 있어야** git URL 설치가 됩니다 (없으면 [OpenUPM 대안](#방법-b--git-없이-openupm--로컬-폴더)). |
 | GenPresso | API 키 + 크레딧 잔액. **미디어 작업은 잔액 10크레딧 이상**일 때만 접수됩니다. |
 | 마이크 | 선택 사항 — 없으면 Enter로 텍스트 요청을 입력할 수 있습니다. |
@@ -102,7 +103,9 @@ https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs.git
    ```
    https://github.com/aras-p/UnityGaussianSplatting.git?path=/package#2c6fed37da67a217367261fcfcd3316d34c73e76
    ```
-5. 이미 어떤 방식으로든(git, OpenUPM, 로컬 포크) Gaussian Splatting이 설치돼 있으면 **절대 건드리지 않습니다.**
+5. 이미 어떤 방식으로든(git, OpenUPM, 로컬 포크) Gaussian Splatting **1.1.0 이상**이 설치돼 있으면 **절대 건드리지 않습니다.**
+   1.1.0 미만(예: 1.0.0, 0.9.1)은 Render Graph에서 스플랫을 그리지 못하므로 SplatPresso 본체가 컴파일되지 않고 비활성 상태로 남습니다.
+   이때 부트스트랩이 콘솔에 오류와 교체할 manifest 줄을 출력하고, 대화상자에서 **동의할 때만** 고정 커밋으로 교체합니다.
 
 - **커밋 고정 이유**: `2c6fed3`은 v1.1.1 이후의 upstream HEAD로, 스플랫과 배경의 합성(composite) 셰이더 수정이 들어 있습니다.
   배치·색감 캘리브레이션이 이 버전으로 이뤄졌습니다.
@@ -178,7 +181,7 @@ https://genpresso.ai/ko/developers 에서 발급합니다 (API 문서: https://g
 
 ### 키 저장 위치 (권장: 사용자 프로필 파일)
 
-**Project Settings > SplatPresso** 의 API Keys 섹션에서 키를 입력하고 **Save to user profile** 을 누르세요.
+**Project Settings > SplatPresso** 의 API Keys 섹션에서 키를 입력하고 **Save** 를 누르세요(사용자 프로필의 키 파일에 저장).
 키는 프로젝트 **바깥**의 아래 파일에 저장되므로, 프로젝트를 압축해 공유하거나 커밋해도 키가 새지 않습니다.
 
 ```
@@ -274,7 +277,7 @@ M/N 단축키는 `SplatPressoRoot.enableModeHotkeys`로 끌 수 있고, 현재 �
 | 방식 | 3D 모델 | 결과 |
 |---|---|---|
 | **Splat** (기본, `GaussianSplat`) | TripoSplat → `model.ply` (262,144 가우시안) | 런타임에 `GaussianSplatRenderer` 오브젝트로 스폰 |
-| **Mesh** (실험적, `Mesh`) | Rodin v2.5 → `model.glb` (Scene-aware: 이미지→3D, Direct: 텍스트→3D) | glTFast로 런타임 로드. glTFast가 없으면 배치 단계에서 해당 객체를 건너뛰므로, Mesh 모드를 쓰기 전에 설치하세요 |
+| **Mesh** (실험적, `Mesh`) | Rodin v2.5 → `model.glb` (Scene-aware: 이미지→3D, Direct: 텍스트→3D) | glTFast로 런타임 로드. glTFast가 없으면 Mesh 요청은 **시작 즉시 실패**합니다(`RunFailed`, 단계 `Idle`, `Mesh mode needs glTFast…`). 미디어 크레딧은 쓰이지 않지만 아무것도 생성되지 않으므로, Mesh 모드를 쓰기 전에 glTFast를 설치하세요 |
 
 - 이미 진행 중인 생성은 **시작 시점의 모드**를 유지합니다. 리플레이는 그 세션이 만들어진 모드를 따릅니다(`mode.txt`, `representation.txt`).
 - 요청은 병렬로 처리됩니다: 동시 실행 최대 `maxConcurrentRuns`(기본 3), 요청당 객체 동시 처리 `maxConcurrentObjects`(기본 4),
@@ -341,7 +344,7 @@ M/N 단축키는 `SplatPressoRoot.enableModeHotkeys`로 끌 수 있고, 현재 �
   그래서 경로를 하나로 고정하지 않고 후보 목록을 순서대로 시도합니다.
 - 제출 시 404(또는 "모델 없음" 류의 400)면 다음 후보로 넘어갑니다. 404는 큐에 들어가지 않으므로 **과금되지 않습니다.**
 - 처음 성공한 경로는 `<persistentDataPath>/SplatPresso/model_paths.json`에 7일간 캐시되어 다음부터 바로 사용됩니다.
-- **Probe media models** 버튼(Project Settings)은 모든 후보에 일부러 검증에 실패하는 요청을 보내 어떤 경로가 존재하는지 보여줍니다.
+- **Test + Probe Media Models** 버튼(Project Settings)은 모든 후보에 일부러 검증에 실패하는 요청을 보내 어떤 경로가 존재하는지 보여줍니다.
   검증 실패 요청은 과금되지 않지만, 잔액 10크레딧 이상이 필요합니다.
 - 경로를 바꾸려면 해당 라우트의 `genpressoPaths` 목록을 수정하세요. 원하는 경로를 맨 앞에 두면 됩니다.
 
@@ -402,13 +405,14 @@ GenPresso는 **작업이 끝난 뒤 실제 사용량으로** 크레딧을 차감
 | 캡처 실패 "MSAA" | URP 에셋의 MSAA가 켜져 있음 | URP 에셋 Quality > Anti Aliasing(MSAA)를 Disabled로 |
 | `capture.jpg`가 상하 반전 | 그래픽 API별 readback 방향 | `SplatCaptureFeature.FlipReadbackOverride`를 `true`/`false`로 지정 (아래 코드) |
 | 오브젝트가 눕거나 반대를 보거나 크기가 어긋남 | 3D 모델의 좌표 관례 차이 | `PlacementNudgeController`로 맞춘 뒤 로그의 `Nudge cumulative …` 값을 설정 `placement`에 반영: yaw 누적값을 `yawOffsetDeg`(기본 270)에 더하고, scale 배율을 `uniformScaleFactor`(기본 0.9)에 곱합니다. Mesh는 `meshYawOffsetDeg` / `meshUniformScaleFactor` |
-| `TripoSplat path not found` / `NotFound … tried: …` | GenPresso에서 해당 경로를 찾지 못함 | **Probe media models** 로 존재하는 경로 확인 → `imageToSplat.genpressoPaths` 맨 앞에 지정. 또는 `FAL_KEY`를 설정해 fal 대체 경로 사용, 또는 N으로 Mesh 모드 |
+| `No GenPresso media path for 'imageToSplat' is available (tried: …)` | GenPresso에서 해당 경로를 찾지 못함 | **Test + Probe Media Models** 로 존재하는 경로 확인 → `imageToSplat.genpressoPaths` 맨 앞에 지정. 또는 `FAL_KEY`를 설정해 fal 대체 경로 사용, 또는 N으로 Mesh 모드 |
 | `GenPresso API key is missing…` / HUD의 키 누락 배너 | 키를 찾지 못함 | Project Settings > SplatPresso에서 저장하거나 `GENPRESSO_API_KEY` 설정. 환경 변수는 에디터를 다시 켜야 반영됩니다 |
 | 402 `GenPresso balance too low` | 잔액 부족 (미디어는 10크레딧 이상 필요) | GenPresso에서 크레딧 충전 |
 | 401 / 403 | 키가 틀렸거나 다른 키가 우선 사용 중 | Project Settings > SplatPresso에서 실제 사용 중인 출처 확인(오래된 환경 변수 주의) |
 | 413 Payload too large | 요청 본문 4 MB 초과 | `maxUtteranceSeconds` 또는 `maxImageLongSide`를 줄이기 |
 | `Too many generations running` | 동시 실행 한도 | 잠시 후 다시 요청하거나 `maxConcurrentRuns` 조정 |
 | 새로 만들면 예전 오브젝트가 사라짐 | 스폰 상한 초과 | `maxSpawnedObjects` (기본 24) |
+| `SplatPresso needs Gaussian Splatting >= 1.1.0` / `SplatPresso` 메뉴에 Install or Repair Dependencies만 있음 | 1.1.0 미만 렌더러가 이미 설치됨 (Render Graph 미지원) | manifest의 렌더러 줄을 위의 고정 커밋 URL로 (또는 **SplatPresso > Install or Repair Dependencies** 대화상자에서 교체 동의) |
 | `GaussianSplatting version mismatch: … m_GpuView …` | 고정 버전과 다른 렌더러 설치 | manifest의 렌더러 줄을 위의 고정 커밋 URL로 |
 | `Mesh mode needs glTFast` | glTFast 미설치 | **SplatPresso > Install or Repair Dependencies** |
 | 빌드에서 메시가 분홍색 | glTFast 셰이더가 빌드에 없음 | glTFast 셰이더 그래프를 Always Included Shaders 또는 Shader Variant Collection에 추가 |
@@ -511,7 +515,9 @@ public class AddChairExample : MonoBehaviour
 
 이 패키지는 aras-p의 렌더러를 **수정하지 않습니다.**
 depth 캡처는 자체 URP 렌더 패스와 셰이더로 하며, 렌더러 내부 필드 하나(`GaussianSplatRenderer.m_GpuView`, 스플랫별 화면 데이터)만
-작은 리플렉션 브리지(`GsInternals`)로 읽습니다. 그래서 렌더러 버전을 커밋으로 고정해 두었고, 다른 버전이면 시작 시 명확한 오류를 냅니다.
+작은 리플렉션 브리지(`GsInternals`)로 읽습니다. 그래서 새로 설치할 때는 렌더러를 커밋으로 고정합니다.
+이미 설치된 렌더러가 1.1.0 미만이면 SplatPresso 본체는 컴파일되지 않고, 부트스트랩이 콘솔에 `SplatPresso needs Gaussian Splatting >= 1.1.0` 오류를 냅니다.
+1.1.0 이상인데 이 필드가 없으면(내부 구조가 바뀐 버전·포크) 시작 시와 **Validate Project** 에서 `GaussianSplatting version mismatch` 오류를 냅니다.
 런타임 스플랫 에셋은 렌더러의 공개 API(`GaussianSplatAsset`)로 만듭니다.
 
 ## 패키지 구조
@@ -566,9 +572,12 @@ everything; aras-p's UnityGaussianSplatting renderer is installed automatically 
    Accept the **Install (git)** dialog; it adds aras-p's renderer pinned to commit `2c6fed3`
    (`https://github.com/aras-p/UnityGaussianSplatting.git?path=/package#2c6fed37da67a217367261fcfcd3316d34c73e76`).
    No git? Choose *Install from OpenUPM* (renderer 1.1.1) and add this package from disk. After installing git, restart Unity **and** Unity Hub.
+   An existing renderer install is left alone if it is 1.1.0 or newer. Older ones (1.0.0 and below cannot render under Render Graph)
+   keep SplatPresso inactive; the bootstrap logs `SplatPresso needs Gaussian Splatting >= 1.1.0` with the manifest line to use instead,
+   and replaces it only if you accept its dialog.
    "Filename too long" means the project path is too deep: move it or use OpenUPM.
 3. **Key**: create one at https://genpresso.ai/ko/developers (starts with `gp_`, shown once). Save it in
-   *Project Settings > SplatPresso > Save to user profile* (writes `~/.splatpresso/keys.json`, outside the project),
+   *Project Settings > SplatPresso* with **Save** (writes the user-profile keys file `~/.splatpresso/keys.json`, outside the project),
    or set `GENPRESSO_API_KEY`. Do not put keys in assets. Click *Test Connection*.
 4. **Scene**: *SplatPresso > Create Demo Scene*, or *SplatPresso > Setup Scene…* in your own scene. Restart the editor if Setup
    switched the Windows graphics API to D3D12.
@@ -580,7 +589,7 @@ everything; aras-p's UnityGaussianSplatting renderer is installed automatically 
    Estimates are configurable per model route; `maxCostPerRun` (25) stops runaway retries.
 7. **Model paths**: each step tries an ordered list of GenPresso paths (fal `fal-ai/x` is `gp/x` on GenPresso; other owners such as
    `google/…` or `tripo3d/…` pass through unchanged) and caches the first one that exists. If none exists and `FAL_KEY` is set,
-   that step runs on fal.ai. Use *Probe media models* to see which paths exist.
+   that step runs on fal.ai. Use *Test + Probe Media Models* to see which paths exist.
 8. **Scripting**: `SplatPressoRoot.StartRun(PlacementRequest)`, `SubmitText(string)`, `CancelAll()`, and the events
    `RunStarted`, `RunProgress`, `ObjectUpdated`, `RunCompleted`, `RunFailed`, `RequestRejected`.
 9. **Troubleshooting**: capture timeout → run *Setup Scene*; nothing renders → D3D12/Vulkan instead of DX11 and Render Graph

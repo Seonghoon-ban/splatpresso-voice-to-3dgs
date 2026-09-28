@@ -20,8 +20,12 @@ not exist yet are silently ignored by Unity, so every external assembly is refer
 | `SplatPresso.Tests` | `Tests/Runtime` | all | `UNITY_INCLUDE_TESTS` && GS && URP | PlayMode tests, mock server |
 
 Symbols defined by `versionDefines` are only visible inside the asmdef that declares them, so every gated asmdef repeats
-the same `versionDefines`. Dependency direction is strictly gated → core; the core never references `SplatPresso.Mesh`
-(it talks to it through `MeshSpawnerRegistry`).
+the same `versionDefines`. The GS expression is `1.1.0` (Unity reads it as >= 1.1.0): 1.1.0 is the first renderer release whose
+URP pass implements `RecordRenderGraph`; 1.0.0 and older only override `Execute()`, which does nothing under Render Graph, so
+compiling against them would give a package that renders no splats and captures garbage depth. With an older renderer every
+gated assembly is excluded and only `SplatPresso.Bootstrap.Editor` runs, so the version check for that case lives there.
+Dependency direction is strictly gated → core; the core never references `SplatPresso.Mesh` (it talks to it through
+`MeshSpawnerRegistry`).
 
 Namespaces: `SplatPresso` (root, core types, settings, keys, `InputCompat`), `SplatPresso.Api`, `SplatPresso.Voice`,
 `SplatPresso.Rendering`, `SplatPresso.Rendering.IO`, `SplatPresso.Placement`, `SplatPresso.Extras`, `SplatPresso.Mesh`,
@@ -42,7 +46,11 @@ Namespaces: `SplatPresso` (root, core types, settings, keys, `InputCompat`), `Sp
 ```
 [InitializeOnLoad] ─ skip in asset import workers ─ once per editor session (SessionState)
    └ delayCall → wait while isCompiling/isUpdating, never in play mode, one Client request at a time
-        ├ PackageInfo.FindForPackageName("org.nesnausk.gaussian-splatting") != null → done (never touch any existing install)
+        ├ PackageInfo.FindForPackageName("org.nesnausk.gaussian-splatting") != null
+        │     version >= 1.1.0 → done (never touch any existing install)
+        │     version <  1.1.0 → LogError + manifest line (SplatPresso stays inactive); interactive: offer to replace with
+        │                        the pinned commit (Client.Add only on explicit accept, respects "Don't ask again" on the
+        │                        automatic path); batch + -splatpressoExitWhenDone → Exit(1)
         ├ "Don't ask again" set (UserSettings/SplatPresso.Bootstrap.asset) → done
         ├ batchmode:
         │     no -splatpressoInstallDeps → log the manifest line as an error, done
@@ -254,7 +262,7 @@ not for accounting; GenPresso bills actual usage at completion.
 
 ## 11. Still to verify on real hardware / accounts
 
-- Which GenPresso media paths exist for each route (TripoSplat in particular); `Probe media models` answers this with a key.
+- Which GenPresso media paths exist for each route (TripoSplat in particular); `Test + Probe Media Models` answers this with a key.
 - Whether GenPresso now reports validation failures as `FAILED` (current docs) or as `COMPLETED` + 422 on the result
   (observed earlier). The client handles both.
 - `image_url` + `input_audio` in one chat message and `response_format: json_schema` through GenPresso (fallbacks exist).

@@ -106,6 +106,8 @@ namespace SplatPresso.Api
         /// Runs one media job for <paramref name="route"/>. <paramref name="buildInput"/> builds the request body for
         /// each target it is about to be submitted to. Throws <see cref="GenpressoException"/>,
         /// <see cref="CostCapExceededException"/>, <see cref="TimeoutException"/> or <see cref="OperationCanceledException"/>.
+        /// A <see cref="TimeoutException"/> is only thrown for a job that never reached COMPLETED (and was cancelled);
+        /// a completed job whose result cannot be fetched throws a non-retryable <see cref="GenpressoException"/>.
         /// </summary>
         public async Awaitable<MediaJobResult> RunAsync(string routeKey, ModelRoute route, Func<MediaTarget, JObject> buildInput,
             string costLabel, Action<string> onStatus, CancellationToken ct)
@@ -146,10 +148,12 @@ namespace SplatPresso.Api
             string auth = "Bearer " + key;
             string baseUrl = m_Settings.apiBaseUrl;
 
-            // Candidates: the cached path first (only while it is still listed, so edits in the settings win), then the list.
+            // Candidates: the cached path first, then the list. The cache entry is tied to this exact candidate list
+            // (a reorder or edit in the settings drops it), and a cached fallback candidate ages out, so the
+            // preferred candidate is tried again.
             var paths = route.CleanPaths();
             var candidates = new List<string>();
-            string cached = ModelPathCache.Get(baseUrl, routeKey);
+            string cached = ModelPathCache.Get(baseUrl, routeKey, paths);
             if (!string.IsNullOrEmpty(cached))
                 foreach (var p in paths)
                     if (string.Equals(p, cached, StringComparison.OrdinalIgnoreCase)) { candidates.Add(p); break; }
@@ -168,7 +172,7 @@ namespace SplatPresso.Api
                 if (sub.rejected != null)
                 {
                     // 422 at submit: the path exists (cache it) but this input is invalid.
-                    ModelPathCache.Set(baseUrl, routeKey, path);
+                    ModelPathCache.Set(baseUrl, routeKey, path, paths);
                     throw sub.rejected;
                 }
                 if (sub.missing)
@@ -181,9 +185,9 @@ namespace SplatPresso.Api
                     continue;
                 }
 
-                ModelPathCache.Set(baseUrl, routeKey, path);
+                ModelPathCache.Set(baseUrl, routeKey, path, paths);
                 m_Ledger?.Record(costLabel, route.estimatedCost);
-                var urls = ResolveJobUrls(sub.json, path, true);
+                var urls = ResolveJobUrls(sub.json, path, true, auth);
                 var result = await PollAndFetchAsync(urls, auth, path, route.timeoutSec, onStatus, ct);
                 return new MediaJobResult { result = result, resolvedPath = path, provider = MediaProvider.Genpresso, requestId = urls.requestId };
             }
@@ -227,7 +231,7 @@ namespace SplatPresso.Api
                 throw new GenpressoException($"fal.ai endpoint '{endpoint}' not found ({sub.missingDetail}).", GenpressoErrorKind.NotFound, 404, null, retryable: false);
 
             m_Ledger?.Record(costLabel, route.estimatedCost);
-            var urls = ResolveJobUrls(sub.json, endpoint, false);
+            var urls = ResolveJobUrls(sub.json, endpoint, false, auth);
             var result = await PollAndFetchAsync(urls, auth, endpoint, route.timeoutSec, onStatus, ct);
             return new MediaJobResult { result = result, resolvedPath = endpoint, provider = MediaProvider.FalDirect, requestId = urls.requestId };
         }
@@ -332,7 +336,7 @@ namespace SplatPresso.Api
             public string requestId, statusUrl, responseUrl, cancelUrl;
         }
 
-        JobUrls ResolveJobUrls(JObject submit, string path, bool genpresso)
+        JobUrls ResolveJobUrls(JObject submit, string path, bool genpresso, string auth)
         {
             var u = new JobUrls
             {
@@ -351,7 +355,9 @@ namespace SplatPresso.Api
             if (string.IsNullOrEmpty(u.statusUrl) || string.IsNullOrEmpty(u.responseUrl))
             {
                 string raw = submit.ToString(Formatting.None);
-                TryCancelFireAndForget(u.cancelUrl, null);
+                // The job was accepted (and will be billed at completion) but cannot be observed: stop it. The cancel
+                // endpoint needs the same Authorization as the submit.
+                TryCancelFireAndForget(u.cancelUrl, auth);
                 throw new GenpressoException(
                     $"Submit response for {path} has neither status_url/response_url nor a request_id: {GenpressoError.Truncate(raw, 500)}",
                     GenpressoErrorKind.Parse, 0, raw, retryable: false);
@@ -367,12 +373,14 @@ namespace SplatPresso.Api
             try
             {
                 // ---- poll: every 1 s for the first 10 s, then every 2 s ----
+                // The budget is checked only AFTER a status read that did not say COMPLETED (or when no status could
+                // be read), never before one: a job that completed at the edge of the budget, or during a stall
+                // (editor pause, long hitch, runInBackground off), is fetched instead of being thrown away. So a
+                // TimeoutException always means the job never completed and was cancelled: safe for callers to retry.
                 int transient = 0;
                 string lastReported = null;
                 while (true)
                 {
-                    if (sw.Elapsed.TotalSeconds > budget)
-                        throw MakeTimeout(urls, auth, path, timeoutSec, "while queued/running");
                     await HttpJson.DelayAsync(sw.Elapsed.TotalSeconds < 10.0 ? 1f : 2f, ct);
 
                     var resp = await HttpJson.SendAsync("GET", urls.statusUrl, null, null, headers, kPollTimeoutSec, ct, throwOnHttpError: false);
@@ -391,6 +399,8 @@ namespace SplatPresso.Api
                             }
                             if (code == 429)
                                 await HttpJson.DelayAsync(resp.RetryAfterSec > 0 ? Mathf.Min(resp.RetryAfterSec, 30f) : 5f + (float)NextRandom(), ct);
+                            if (sw.Elapsed.TotalSeconds > budget)
+                                throw MakeTimeout(urls, auth, path, timeoutSec, "while queued/running");
                             continue;
                         }
                         // Hard 4xx: the job cannot be observed any more; stop it so it does not keep costing credits.
@@ -411,6 +421,8 @@ namespace SplatPresso.Api
                             throw new GenpressoException($"Status of {path} is not JSON: {GenpressoError.Truncate(resp.Text, 300)}",
                                 GenpressoErrorKind.Parse, code, resp.Text);
                         }
+                        if (sw.Elapsed.TotalSeconds > budget)
+                            throw MakeTimeout(urls, auth, path, timeoutSec, "while queued/running");
                         continue;
                     }
                     transient = 0;
@@ -428,15 +440,26 @@ namespace SplatPresso.Api
                         break;
                     if (IsTerminalFailure(state))
                         throw await BuildJobFailureAsync(urls, headers, path, state, status, ct);
-                    // IN_QUEUE / IN_PROGRESS / null / anything unknown: keep polling.
+                    // IN_QUEUE / IN_PROGRESS / null / anything unknown: keep polling (while the budget lasts).
+                    if (sw.Elapsed.TotalSeconds > budget)
+                        throw MakeTimeout(urls, auth, path, timeoutSec, "while queued/running");
                 }
 
-                // ---- fetch result (same budget; the output is already paid for, never re-submit) ----
+                // ---- fetch result (the output is already paid for: never cancel, never re-submit) ----
+                // Own deadline, at least 90 s from COMPLETED, so a job that completed near the end of the poll budget
+                // still gets through the "still in progress" lag and transient fetch errors.
+                double completedAt = sw.Elapsed.TotalSeconds;
+                double fetchDeadline = completedAt + Math.Max(90.0, budget - completedAt);
                 int fetchFailures = 0;
                 while (true)
                 {
-                    if (sw.Elapsed.TotalSeconds > budget)
-                        throw MakeTimeout(urls, auth, path, timeoutSec, "waiting for the result body");
+                    if (sw.Elapsed.TotalSeconds > fetchDeadline)
+                        // Not a TimeoutException (callers retry those, i.e. re-submit and pay again) and no cancel
+                        // (pointless after COMPLETED).
+                        throw new GenpressoException(
+                            $"Result of {path} was not available {sw.Elapsed.TotalSeconds - completedAt:F0}s after COMPLETED " +
+                            $"(request {urls.requestId ?? "?"}; the job completed; not re-submitting)",
+                            GenpressoErrorKind.Timeout, 0, null, retryable: false);
 
                     var resp = await HttpJson.SendAsync("GET", urls.responseUrl, null, null, headers, kFetchTimeoutSec, ct, throwOnHttpError: false);
                     long code = resp.StatusCode;

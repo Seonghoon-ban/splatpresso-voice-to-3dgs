@@ -37,6 +37,52 @@ namespace SplatPresso.Tests
         }
 
         [Test]
+        public void ModelPathCache_AReorderDropsTheEntry_AndAFallbackPathIsNotKeptAlive()
+        {
+            string dir = EditorTestUtil.NewTempDir("modelpaths");
+            string file = Path.Combine(dir, "model_paths.json");
+            string savedOverride = ModelPathCache.FilePathOverride;
+            bool savedPersist = ModelPathCache.PersistToDisk;
+            try
+            {
+                ModelPathCache.PersistToDisk = true;
+                ModelPathCache.FilePathOverride = file;
+                const string baseUrl = "https://example.invalid/api/v1";
+                var order = new List<string> { "gp/preferred", "gp/fallback" };
+
+                // editing the candidate order in the settings must win over the cached path
+                ModelPathCache.Set(baseUrl, "route", "gp/fallback", order);
+                Assert.AreEqual("gp/fallback", ModelPathCache.Get(baseUrl, "route", order));
+                Assert.IsNull(ModelPathCache.Get(baseUrl, "route", new List<string> { "gp/fallback", "gp/preferred" }));
+                Assert.IsNull(ModelPathCache.Get(baseUrl, "route", order), "the stale entry is removed");
+
+                // back-date two entries by 3 days, then use both again
+                ModelPathCache.Set(baseUrl, "a", "gp/fallback", order);
+                ModelPathCache.Set(baseUrl, "b", "gp/preferred", order);
+                string old = DateTime.UtcNow.AddDays(-3).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+                var entries = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, string>>>(File.ReadAllText(file));
+                foreach (var e in entries.Values)
+                    e["savedUtc"] = old;
+                File.WriteAllText(file, JsonConvert.SerializeObject(entries));
+                ModelPathCache.FilePathOverride = file; // reload
+
+                ModelPathCache.Set(baseUrl, "a", "gp/fallback", order);
+                ModelPathCache.Set(baseUrl, "b", "gp/preferred", order);
+                entries = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, string>>>(File.ReadAllText(file));
+                string SavedOf(string route) => entries.First(kv => kv.Key.EndsWith("|" + route, StringComparison.Ordinal)).Value["savedUtc"];
+                Assert.AreEqual(old, SavedOf("a"), "using a fallback candidate does not refresh its age (it expires, then the preferred one is retried)");
+                Assert.AreNotEqual(old, SavedOf("b"), "the preferred candidate is refreshed on use");
+                Assert.AreEqual("gp/fallback", ModelPathCache.Get(baseUrl, "a", order));
+            }
+            finally
+            {
+                ModelPathCache.FilePathOverride = savedOverride;
+                ModelPathCache.PersistToDisk = savedPersist;
+                EditorTestUtil.DeleteDir(dir);
+            }
+        }
+
+        [Test]
         public void DataUri_IsBase64WithMime()
         {
             Assert.AreEqual("data:image/png;base64,AQID", MediaEndpoints.DataUri("image/png", new byte[] { 1, 2, 3 }));

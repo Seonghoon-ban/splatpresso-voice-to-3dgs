@@ -23,6 +23,12 @@ namespace SplatPresso
         static bool s_WarnedNoBackend;
 #endif
 
+        // Mouse-look guard (see MouseDelta): frame of the last cursor lock-state change.
+        static CursorLockMode s_LastLockState;
+        static int s_LockChangedFrame = int.MinValue / 2;
+        static int s_LockCheckedFrame = -1;
+        const int kIgnoreFramesAfterLockChange = 2;
+
         /// <summary>True while the key (or KeyCode.Mouse0..6 button) is held.</summary>
         public static bool GetKey(KeyCode key)
         {
@@ -80,10 +86,17 @@ namespace SplatPresso
         /// <summary>
         /// Mouse movement this frame, scaled to roughly match legacy <c>Input.GetAxis("Mouse X"/"Mouse Y")</c>.
         /// </summary>
+        /// <remarks>
+        /// Returns zero for a couple of frames after the cursor lock state changes and while the application is
+        /// not focused: locking the cursor warps the OS pointer to the window centre, and the Input System reports
+        /// that warp as one large delta, which would snap a mouse-look camera on the first frame.
+        /// </remarks>
         public static Vector2 MouseDelta
         {
             get
             {
+                if (SuppressMouseLook())
+                    return Vector2.zero;
 #if ENABLE_INPUT_SYSTEM && SPLATPRESSO_INPUTSYSTEM
                 var mouse = Mouse.current;
                 if (mouse != null)
@@ -196,9 +209,27 @@ namespace SplatPresso
         }
 #endif
 
+        static bool SuppressMouseLook()
+        {
+            int frame = Time.frameCount;
+            if (frame != s_LockCheckedFrame)
+            {
+                s_LockCheckedFrame = frame;
+                if (Cursor.lockState != s_LastLockState)
+                {
+                    s_LastLockState = Cursor.lockState;
+                    s_LockChangedFrame = frame;
+                }
+            }
+            return frame - s_LockChangedFrame <= kIgnoreFramesAfterLockChange || !Application.isFocused;
+        }
+
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         static void ResetStatics()
         {
+            s_LastLockState = CursorLockMode.None;
+            s_LockChangedFrame = int.MinValue / 2;
+            s_LockCheckedFrame = -1;
 #if ENABLE_LEGACY_INPUT_MANAGER
             s_LegacyMouseAxesBroken = false;
 #else

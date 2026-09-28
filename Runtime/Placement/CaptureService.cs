@@ -51,6 +51,10 @@ namespace SplatPresso.Placement
             var cam = ResolveCamera();
             if (cam == null)
                 throw new InvalidOperationException("[SplatPresso] CaptureService: no target camera and no Camera.main.");
+            // Placement back-projects depth through a pinhole model (vertical FOV), and the splat renderer assumes a
+            // perspective projection too, so an orthographic capture would place objects at meaningless positions.
+            if (cam.orthographic)
+                throw new InvalidOperationException($"[SplatPresso] CaptureService: camera '{cam.name}' is orthographic; placement needs a perspective camera.");
             var s = Settings;
 
             // Wait for a previous capture to drain (up to ~2 s). The voice agent's speech-turn snapshot uses the
@@ -98,6 +102,8 @@ namespace SplatPresso.Placement
                 string why = SplatCaptureFeature.LastError;
                 throw new InvalidOperationException("[SplatPresso] Capture failed: " + (string.IsNullOrEmpty(why) ? "see previous errors" : why));
             }
+            if (raw.orthographic)
+                throw new InvalidOperationException($"[SplatPresso] CaptureService: camera '{cam.name}' switched to orthographic before the capture rendered; placement needs a perspective camera.");
 
             var result = new CaptureResult
             {

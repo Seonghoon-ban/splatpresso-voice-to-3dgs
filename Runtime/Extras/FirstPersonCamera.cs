@@ -6,8 +6,8 @@ namespace SplatPresso.Extras
 {
     /// <summary>
     /// FPS-style first-person controls: the cursor is locked and the mouse always looks (no button held), WASD
-    /// walks relative to the view yaw. Esc releases the cursor, left-click locks it again. Shift = fast, mouse
-    /// scroll = adjust speed.
+    /// walks relative to the view yaw. Esc releases the cursor, left-click locks it again (on release, and not when
+    /// the click went to an IMGUI control such as the VoiceHud mode chips). Shift = fast, mouse scroll = adjust speed.
     /// </summary>
     /// <remarks>
     /// Walk mode (default): movement stays on the horizontal plane at the current eye height (gaussian splat
@@ -43,6 +43,14 @@ namespace SplatPresso.Extras
         float m_Yaw;
         float m_Pitch;
 
+        // Click-to-relock is deferred to the button release and dropped when an IMGUI control grabbed the press:
+        // locking on press warps the pointer to the window centre before OnGUI sees the MouseUp, so HUD buttons
+        // (VoiceHud mode chips) could never be clicked.
+        bool m_RelockPending;
+        bool m_RelockClaimedByGui;
+        int m_RelockArmedFrame;
+        int m_IdleHotControl;
+
         static bool IsLocked => Cursor.lockState == CursorLockMode.Locked;
 
         void OnEnable()
@@ -54,18 +62,30 @@ namespace SplatPresso.Extras
                 LockCursor();
         }
 
-        void OnDisable() => UnlockCursor();
+        void OnDisable()
+        {
+            m_RelockPending = false;
+            UnlockCursor();
+        }
 
         void Update()
         {
             bool typing = ExtrasInput.TextInputFocused;
 
-            // cursor lock lifecycle: Esc releases, left-click re-locks (suppressed while a HUD panel or the text
-            // box is open, so its controls stay clickable)
+            // cursor lock lifecycle: Esc releases, a left click re-locks on release unless an IMGUI control took
+            // the press (suppressed while a HUD panel or the text box is open, so its controls stay clickable)
+            UpdatePendingRelock();
             if (!typing && InputCompat.GetKeyDown(KeyCode.Escape))
+            {
+                m_RelockPending = false;
                 UnlockCursor();
-            else if (!IsLocked && InputCompat.GetMouseButtonDown(0) && !ExtrasInput.CursorRelockBlocked)
-                LockCursor();
+            }
+            else if (!IsLocked && !m_RelockPending && InputCompat.GetMouseButtonDown(0) && !ExtrasInput.CursorRelockBlocked)
+            {
+                m_RelockPending = true;
+                m_RelockClaimedByGui = false;
+                m_RelockArmedFrame = Time.frameCount;
+            }
 
             float scroll = InputCompat.ScrollDelta; // notches
             if (Mathf.Abs(scroll) > 0.0001f)
@@ -113,6 +133,34 @@ namespace SplatPresso.Extras
                 if (height != 0f)
                     transform.position += Vector3.up * (height * heightAdjustSpeed * (fast ? fastMultiplier : 1f) * dt);
             }
+        }
+
+        void UpdatePendingRelock()
+        {
+            if (!m_RelockPending)
+                return;
+            if (IsLocked || m_RelockClaimedByGui || ExtrasInput.CursorRelockBlocked)
+            {
+                m_RelockPending = false; // locked elsewhere, or the click belongs to a GUI control / open HUD panel
+                return;
+            }
+            // lock once the button is up and OnGUI has seen the press (at least one frame after it)
+            if (Time.frameCount > m_RelockArmedFrame && !InputCompat.GetMouseButton(0))
+            {
+                m_RelockPending = false;
+                LockCursor();
+            }
+        }
+
+        // IMGUI makes the pressed control hot (GUIUtility.hotControl) on MouseDown and releases it on MouseUp; a
+        // hot control appearing after the relock press means the click is a GUI click, not a click-to-lock.
+        void OnGUI()
+        {
+            int hot = GUIUtility.hotControl;
+            if (!m_RelockPending)
+                m_IdleHotControl = hot;
+            else if (hot != 0 && hot != m_IdleHotControl)
+                m_RelockClaimedByGui = true;
         }
 
         static void LockCursor()

@@ -22,11 +22,17 @@ namespace SplatPresso.Rendering
         public Vector3 cameraPosition;
         /// <summary>Camera rotation recorded in the same frame as the pixels.</summary>
         public Quaternion cameraRotation;
-        /// <summary>Vertical field of view in degrees.</summary>
+        /// <summary>Vertical field of view in degrees (perspective cameras only; meaningless when <see cref="orthographic"/>).</summary>
         public float verticalFovDeg;
         /// <summary>Near clip plane distance.</summary>
         public float nearPlane;
         /// <summary>Far clip plane distance.</summary>
         public float farPlane;
+        /// <summary>
+        /// True when the camera used an orthographic projection. <see cref="depthEye"/> is still correct linear depth,
+        /// but <see cref="verticalFovDeg"/> does not describe the projection, so pinhole back-projection (placement) must
+        /// reject such a capture. RGB-only consumers (voice snapshots) can ignore it.
+        /// </summary>
+        public bool orthographic;
     }
 }

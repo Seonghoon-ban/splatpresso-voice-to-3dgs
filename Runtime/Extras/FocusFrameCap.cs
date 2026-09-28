@@ -12,6 +12,9 @@ namespace SplatPresso.Extras
     /// heartbeat stops while the render thread spins). Capping to 30 fps while unfocused removes the trigger, and
     /// the generation pipeline still progresses normally at 30 fps. Focus changes are logged so a freeze can be
     /// narrowed down in Player.log.
+    /// Desktop platforms ignore <see cref="Application.targetFrameRate"/> while <see cref="QualitySettings.vSyncCount"/>
+    /// is above 0 (the default quality levels of new Unity 6 projects use VSync), so vSync is also suspended while
+    /// unfocused and restored together with the frame rate.
     /// Enable it either by adding the component, or with <see cref="SplatPressoSettings.capFrameRateWhenUnfocused"/>
     /// (a persistent instance is then created after the first scene load if the scene has none).
     /// </remarks>
@@ -29,6 +32,8 @@ namespace SplatPresso.Extras
 
         bool m_Capped;
         int m_PreviousTargetFrameRate;
+        int m_PreviousVSyncCount;
+        bool m_VSyncOverridden;
 
         // Honors the settings flag without scene setup. Runs after Awake, so a root that assigned
         // SplatPressoSettings.Active (or added this component) in Awake is seen here.
@@ -67,6 +72,11 @@ namespace SplatPresso.Extras
                 return;
             m_PreviousTargetFrameRate = Application.targetFrameRate;
             m_Capped = true;
+            // desktop ignores targetFrameRate while vSync is on - suspend it for the unfocused period
+            m_PreviousVSyncCount = QualitySettings.vSyncCount;
+            m_VSyncOverridden = m_PreviousVSyncCount != 0;
+            if (m_VSyncOverridden)
+                QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = Mathf.Max(1, unfocusedFrameRate);
         }
 
@@ -78,6 +88,9 @@ namespace SplatPresso.Extras
             // only restore if nobody changed it meanwhile
             if (Application.targetFrameRate == Mathf.Max(1, unfocusedFrameRate))
                 Application.targetFrameRate = m_PreviousTargetFrameRate;
+            if (m_VSyncOverridden && QualitySettings.vSyncCount == 0)
+                QualitySettings.vSyncCount = m_PreviousVSyncCount;
+            m_VSyncOverridden = false;
         }
     }
 }

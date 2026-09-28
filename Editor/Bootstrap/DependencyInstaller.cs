@@ -60,6 +60,11 @@ namespace SplatPresso.Bootstrap
 
         const string kTitle = "SplatPresso Voice To 3DGS";
         const string kPinnedCommit = "2c6fed37da67a217367261fcfcd3316d34c73e76";
+        // Supported GS range [1.1.0, 2.0.0): 1.1.0 added URP Render Graph support (GaussianSplatURPFeature before it
+        // only implements Execute, so it renders nothing once Setup turns Render Graph on). The other SplatPresso
+        // assemblies are gated on the minimum through asmdef versionDefines, so only this assembly can report it.
+        static readonly Version kMinGsVersion = new Version(1, 1, 0);
+        static readonly Version kMaxGsVersionExclusive = new Version(2, 0, 0);
         const string kCheckedKey = "SplatPresso.Bootstrap.Checked";
         const string kExitPendingKey = "SplatPresso.Bootstrap.ExitPending";
         const double kReloadTimeoutSec = 300;        // install succeeded but no domain reload -> give up
@@ -127,6 +132,19 @@ namespace SplatPresso.Bootstrap
             var gs = FindPackage(GsName);
             if (gs != null)
             {
+                if (!IsSupportedGsVersion(gs.version))
+                {
+                    // Still never replaced without explicit consent; batch mode only reports.
+                    Debug.LogError(UnsupportedGsMessage(gs));
+                    if (exitWhenDone)
+                    {
+                        Exit(1);
+                        return;
+                    }
+                    if (!batch && (fromMenu || !BootstrapPrefs.instance.dontAskGs))
+                        OfferGsReplacement(gs);
+                    return;
+                }
                 if (exitWhenDone)
                 {
                     Debug.Log("[SplatPresso] Dependencies already installed: " + Describe(gs));
@@ -354,6 +372,70 @@ namespace SplatPresso.Bootstrap
                         Debug.LogError($"[SplatPresso] Installing glTFast failed ({r.Error?.errorCode}): {r.Error?.message}");
                 });
             }
+        }
+
+        // Only after explicit consent: an unsupported install is otherwise left untouched (it may be a user's fork).
+        static void OfferGsReplacement(PackageInfo gs)
+        {
+            string current = Describe(gs);
+            string range = $"{kMinGsVersion} or newer, below {kMaxGsVersionExclusive}";
+            if (gs.source == PackageSource.Embedded)
+            {
+                EditorUtility.DisplayDialog(kTitle,
+                    $"{current} is embedded in the project, but SplatPresso needs Gaussian Splatting {range} (1.1.0 added URP Render Graph " +
+                    $"support). Update the embedded copy at\n{gs.resolvedPath}\nor delete it and add this line to Packages/manifest.json:\n" + ManifestLine(),
+                    "OK");
+                return;
+            }
+            int choice = EditorUtility.DisplayDialogComplex(kTitle,
+                $"{current} is installed, but SplatPresso needs Gaussian Splatting {range} (1.1.0 added URP Render Graph support, " +
+                "which SplatPresso needs; older versions render nothing with Render Graph on).\n\n" +
+                "Replace it with:\n" + GsGitUrl + "\n\nThis changes the \"" + GsName + "\" entry in Packages/manifest.json.",
+                "Replace (git)", "Not now", "Don't ask again");
+            if (choice == 1)
+                return;
+            if (choice == 2)
+            {
+                BootstrapPrefs.instance.dontAskGs = true;
+                BootstrapPrefs.instance.SaveNow();
+                Debug.Log("[SplatPresso] Will not ask again in this project. Replace Gaussian Splatting later from " +
+                          "SplatPresso > Install or Repair Dependencies, or set this line in Packages/manifest.json:\n" + ManifestLine());
+                return;
+            }
+            InstallGs(interactive: true, alsoGltf: false, exitWhenDone: false);
+        }
+
+        /// <summary>
+        /// True when <paramref name="version"/> is in the supported range [1.1.0, 2.0.0). A prerelease/build suffix is
+        /// ignored; an unparseable version is not blocked.
+        /// </summary>
+        internal static bool IsSupportedGsVersion(string version)
+        {
+            var v = ParseVersion(version);
+            return v == null || (v >= kMinGsVersion && v < kMaxGsVersionExclusive);
+        }
+
+        static Version ParseVersion(string version)
+        {
+            if (string.IsNullOrEmpty(version))
+                return null;
+            int cut = version.IndexOfAny(new[] { '-', '+' });
+            if (cut >= 0)
+                version = version.Substring(0, cut);
+            if (!Version.TryParse(version.Trim(), out var v))
+                return null;
+            return new Version(v.Major, v.Minor, Math.Max(0, v.Build)); // "1.1" == "1.1.0"
+        }
+
+        static string UnsupportedGsMessage(PackageInfo gs)
+        {
+            var v = ParseVersion(gs.version);
+            string why = v != null && v < kMinGsVersion
+                ? $"SplatPresso needs {GsName} {kMinGsVersion} or newer (1.1.0 added URP Render Graph support), so SplatPresso is inactive"
+                : $"SplatPresso supports {GsName} from {kMinGsVersion} up to (not including) {kMaxGsVersionExclusive}; this version is untested " +
+                  "and may not compile or render";
+            return $"[SplatPresso] Installed {Describe(gs)}: {why}. Replace it with SplatPresso > Install or Repair Dependencies, " +
+                   "or set this line in \"dependencies\" in Packages/manifest.json:\n" + ManifestLine();
         }
 
         static bool AskGltf() => EditorUtility.DisplayDialog(kTitle,

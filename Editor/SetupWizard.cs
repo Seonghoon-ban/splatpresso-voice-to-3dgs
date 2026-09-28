@@ -285,7 +285,8 @@ namespace SplatPresso.EditorTools
                 {
                     if (GUILayout.Button("Create Demo Scene"))
                     {
-                        DemoSceneBuilder.Build(interactive: true);
+                        // Keeps this window's project opt-outs (Render Graph, graphics APIs, ...); the builder sets the scene fields.
+                        DemoSceneBuilder.Build(true, m_Options.Clone());
                         RefreshStatus();
                         GUIUtility.ExitGUI();
                     }
@@ -451,6 +452,15 @@ namespace SplatPresso.EditorTools
             {
                 report.warnings.Add("URP global settings are not available yet (URP creates them the first time it renders; new ones have Render " +
                                     "Graph on). Run SplatPresso > Validate Project later to confirm.");
+                return;
+            }
+            if (UrpRendererUtil.GsUrpFeatureSupportsRenderGraph() == false)
+            {
+                // Gaussian Splatting 1.0.x: its URP feature only implements Execute, so turning Render Graph on would hide
+                // every splat in the project (the user's own too) and starve the capture of per-splat view data.
+                report.errors.Add("The installed Gaussian Splatting renders only in URP compatibility mode (its GaussianSplatURPFeature has no " +
+                                  "Render Graph path), but SplatPresso needs Render Graph. Update it to 1.1.0 or newer (SplatPresso > Install or " +
+                                  "Repair Dependencies)." + (rg.enableRenderCompatibilityMode ? " Render Graph was left off." : ""));
                 return;
             }
             if (!rg.enableRenderCompatibilityMode)
@@ -620,6 +630,28 @@ namespace SplatPresso.EditorTools
             }
         }
 
+        /// <summary>
+        /// The project-wide changes <see cref="Run"/> with <paramref name="options"/> would make WITHOUT a dialog of its own
+        /// (Render Graph on, Windows graphics API order), described for a confirmation prompt. Empty when none are pending.
+        /// </summary>
+        internal static List<string> PendingUnaskedProjectChanges(SetupOptions options)
+        {
+            var list = new List<string>();
+            if (options == null)
+                return list;
+            if (options.enableRenderGraph && UrpRendererUtil.IsRenderGraphCompatibilityMode() == true)
+                list.Add("turn URP Render Graph on (compatibility mode off, in the URP global settings)");
+            if (options.fixGraphicsApis && !StartsWithModernApi(PlayerSettings.GetGraphicsAPIs(BuildTarget.StandaloneWindows64)))
+                list.Add("put D3D12 first in the Windows player's graphics APIs");
+            return list;
+        }
+
+        static bool StartsWithModernApi(GraphicsDeviceType[] apis)
+        {
+            var first = apis != null && apis.Length > 0 ? apis[0] : GraphicsDeviceType.Null;
+            return first == GraphicsDeviceType.Direct3D12 || first == GraphicsDeviceType.Vulkan;
+        }
+
         // DX11 cannot render splats (upstream: "DX12 or Vulkan on Windows, i.e. DX11 will not work"). Only fixes the
         // case where D3D11/OpenGL is first; a user's [Vulkan, D3D12] order is kept. Other platforms are left alone.
         static void EnsureWindowsGraphicsApis(SetupReport report)
@@ -640,12 +672,29 @@ namespace SplatPresso.EditorTools
         }
 
         // The Windows editor itself starts on the active build target's first graphics API, so an editor on D3D11
-        // (or OpenGL) shows no splats in play mode until it restarts.
+        // (or OpenGL) shows no splats in play mode until it restarts. A restart is only offered when it would help:
+        // the active target's list now starts with D3D12/Vulkan and no -force-* flag pins the current device.
         static void CheckEditorGraphicsDevice(SetupReport report)
         {
             var device = SystemInfo.graphicsDeviceType;
             if (device != GraphicsDeviceType.Direct3D11 && device != GraphicsDeviceType.OpenGLCore)
                 return;
+            var target = EditorUserBuildSettings.activeBuildTarget;
+            string forced = Environment.GetCommandLineArgs().FirstOrDefault(a =>
+                a.StartsWith("-force-d3d11", StringComparison.OrdinalIgnoreCase) || a.StartsWith("-force-gl", StringComparison.OrdinalIgnoreCase));
+            if (forced != null)
+            {
+                report.warnings.Add($"The editor is running on {device}, where Gaussian splats do not render, because it was started with {forced}. " +
+                                    "Start it without that flag (or with -force-d3d12).");
+                return;
+            }
+            if (!StartsWithModernApi(PlayerSettings.GetGraphicsAPIs(target)))
+            {
+                report.warnings.Add($"The editor is running on {device}, where Gaussian splats do not render. It starts on the first graphics API of " +
+                                    $"the active build target ({target}); put D3D12 or Vulkan first in Player Settings > Other Settings > Graphics APIs " +
+                                    "for that target and restart the editor, or start it with -force-d3d12.");
+                return;
+            }
             report.warnings.Add($"The editor is running on {device}, where Gaussian splats do not render. Restart the editor after the graphics " +
                                 "API change (or start it with -force-d3d12).");
             report.restartRequired = true;

@@ -65,6 +65,7 @@ namespace SplatPresso
         bool m_CostCapHitInObjects;
         bool m_CostCapNarrated;
         string m_FirstSkipReason;
+        bool m_ObjectsInvalidated;
 
         // ------------------------------------------------------------------------------------------
         // Public surface
@@ -191,8 +192,9 @@ namespace SplatPresso
             (e is GenpressoException g && (g.Kind == GenpressoErrorKind.Unauthorized || g.Kind == GenpressoErrorKind.InsufficientCredits));
 
         // Retrying the SAME call only helps for transient errors: deterministic ones (validation, a job whose result
-        // was already paid for, ...) are marked non-retryable by the API layer, so a retry would just pay twice.
-        // Other exceptions (e.g. TimeoutException of a media job) are retried, as in the proven pipeline.
+        // was already paid for - including a result fetch/download that failed after COMPLETED, ...) are marked
+        // non-retryable by the API layer, so a retry would just pay twice. Other exceptions (e.g. the TimeoutException
+        // of a media job still queued/running, which is cancelled and not billed) are retried, as in the proven pipeline.
         static bool IsRetryable(Exception e) =>
             !IsFatal(e) && !(e is GenpressoException g && !g.Retryable);
 
@@ -263,6 +265,7 @@ namespace SplatPresso
             m_CostCapHitInObjects = false;
             m_CostCapNarrated = false;
             m_FirstSkipReason = null;
+            m_ObjectsInvalidated = false;
             m_ActiveMode = Mode;
             m_ActiveRep = Representation;
 
@@ -293,7 +296,9 @@ namespace SplatPresso
                     throw new StageFailedException(PlacementStage.Idle,
                         "Mesh mode needs glTFast (install it via SplatPresso > Install or Repair Dependencies), or switch to Gaussian splats");
 
-                InvalidateStaleArtifacts(session, startAt);
+                // Stale artifacts of a replay are NOT deleted up front: they are discarded only right before the
+                // upstream artifact they derive from is overwritten (see InvalidateObjectCachesOnce / SaveEdited), so a
+                // replay that fails or is cancelled earlier leaves the session (and its paid models) intact.
 
                 // ---- request (persist fresh; load from the session on replay) ----
                 if (request == null)
@@ -399,24 +404,18 @@ namespace SplatPresso
             Raise(OnFailed, failure, nameof(OnFailed));
         }
 
-        // Replays re-run some stages; artifacts derived from what they replace must not be reused.
-        void InvalidateStaleArtifacts(PipelineSession session, StartStage startAt)
+        // Per-object caches (objects/) are keyed only by object id, so a new capture, decision, edit or verification
+        // would otherwise reuse cutouts / images / models made for the old one; result.json lists those objects and is
+        // dropped with them. Called right BEFORE such an upstream artifact is overwritten (never up front), so a replay
+        // that fails or is cancelled before replacing anything keeps the session's paid models and a consistent
+        // result.json. Once per run.
+        void InvalidateObjectCachesOnce(PipelineSession session)
         {
-            if (startAt == StartStage.Capture || startAt == StartStage.Place)
+            if (m_ObjectsInvalidated)
                 return;
-            // A new edit makes the previous edit's depth stale (it would otherwise be reused as-is).
-            if (startAt <= StartStage.Edit)
-            {
-                session.DeleteFile(PipelineSession.DepthGenPng);
-                session.DeleteFile(PipelineSession.DepthGenUrlTxt);
-            }
-            // Per-object caches are keyed only by object id: a new edit/verification (or, in Direct mode, a new
-            // decision) would otherwise reuse cutouts / images made for the old one.
-            bool objectCachesStale = m_ActiveMode == GenerationMode.DirectTextTo3D
-                ? startAt <= StartStage.Decide
-                : startAt <= StartStage.Verify;
-            if (objectCachesStale)
-                session.DeleteObjectsDir();
+            m_ObjectsInvalidated = true;
+            session.DeleteObjectsDir();
+            session.DeleteFile(PipelineSession.ResultJson);
         }
 
         // Place replays: re-derive paths from the session folder (it may have moved) and make objects placeable again.
@@ -433,13 +432,21 @@ namespace SplatPresso
             foreach (var o in result.objects)
             {
                 o.runId = RunId;
-                string model = Path.Combine(session.ObjectDirPath(o.id), PipelineSession.ModelFileName(o.representation));
-                if (File.Exists(model))
-                    o.modelPath = model;
                 string cutout = Path.Combine(session.ObjectDirPath(o.id), PipelineSession.ObjectCutoutPng);
                 if (File.Exists(cutout))
                     o.cutoutPath = cutout;
-                if (o.status == ObjectStatus.Placed || o.status == ObjectStatus.Ready)
+                string model = Path.Combine(session.ObjectDirPath(o.id), PipelineSession.ModelFileName(o.representation));
+                if (File.Exists(model))
+                {
+                    // Decided by the model file, not the stored status: result.json keeps the placer's statuses, and an
+                    // object whose PLACEMENT failed last time (Skipped) must be placed again. A model file is only
+                    // written by a successful generation (downloaded to a temp file, then moved), so objects skipped
+                    // during generation stay skipped.
+                    o.modelPath = model;
+                    o.status = ObjectStatus.Ready;
+                    o.skipReason = null;
+                }
+                else if (o.status == ObjectStatus.Placed || o.status == ObjectStatus.Ready)
                 {
                     if (File.Exists(o.modelPath))
                     {
@@ -469,6 +476,8 @@ namespace SplatPresso
                 capture = await m_CaptureProvider.CaptureAsync(ct);
                 if (capture == null || capture.rgbJpeg == null)
                     throw new StageFailedException(PlacementStage.Capturing, "capture returned no image");
+                // A new view (fresh run: nothing to delete; replay from Capture) makes every per-object cache stale.
+                InvalidateObjectCachesOnce(session);
                 capture.SaveTo(session.Dir);
             }
             else
@@ -504,6 +513,11 @@ namespace SplatPresso
                 decision.objects ??= new List<DecidedObject>();
                 decision.objects.RemoveAll(o => o == null);
                 EnsureUniqueDecisionIds(decision);
+                // New plan -> the objects cached for the old one are stale (both modes; ids restart at 1..N). An
+                // unusable plan (infeasible / no objects) fails every later stage that loads it (checks below), so it
+                // leaves the old objects and result.json alone (a Place replay can still use them).
+                if (decision.feasible && decision.objects.Count > 0)
+                    InvalidateObjectCachesOnce(session);
                 session.SaveJson(PipelineSession.DecisionJson, decision);
             }
             else
@@ -557,7 +571,8 @@ namespace SplatPresso
             // ---- 4. hot depth (not awaited until step 7) ----
             if (m_Settings.useDepthEstimation)
             {
-                if (session.Has(PipelineSession.DepthGenPng))
+                // The stored depth belongs to the stored edit: reuse it only when this run did not make a new edit.
+                if (startAt > StartStage.Edit && session.Has(PipelineSession.DepthGenPng))
                     m_DepthPath = session.PathOf(PipelineSession.DepthGenPng);
                 else
                     StartDepthTask(session, edited, ct);
@@ -594,6 +609,8 @@ namespace SplatPresso
                     }
                 }
                 NormalizeVerifiedIds(decision, verification);
+                // New verified boxes -> cutouts cut with the old ones are stale.
+                InvalidateObjectCachesOnce(session);
                 session.SaveJson(PipelineSession.VerificationJson, verification);
             }
             else
@@ -801,8 +818,7 @@ namespace SplatPresso
                 }
                 // Mesh: Rodin text-to-3D straight from the user's words (no image step).
 
-                // b) 3D generation
-                RaiseObjectUpdate(obj, SubStages.Generating3D);
+                // b) 3D generation (Generate3DAsync raises Generating3D on every attempt)
                 obj.modelPath = await Generate3DAsync(media, obj, source, session, ct);
                 obj.sourceImageUrl = source?.Url;
                 obj.status = ObjectStatus.Ready;
@@ -873,8 +889,14 @@ namespace SplatPresso
             }
         }
 
-        static void SaveEdited(PipelineSession session, byte[] bytes, string url)
+        // A new edited image makes everything derived from the previous one stale: the per-object caches (cut from it)
+        // and its depth map. Discarded only now that the replacement exists. (When depth estimation is on, the caller
+        // then starts a new depth task, which also supersedes a still-running one; no await happens in between.)
+        void SaveEdited(PipelineSession session, byte[] bytes, string url)
         {
+            InvalidateObjectCachesOnce(session);
+            session.DeleteFile(PipelineSession.DepthGenPng);
+            session.DeleteFile(PipelineSession.DepthGenUrlTxt);
             session.SaveBytes(PipelineSession.EditedJpg, bytes);
             session.SaveText(PipelineSession.EditedUrlTxt, url ?? "");
         }
@@ -1188,8 +1210,8 @@ namespace SplatPresso
                     }
                 }
 
-                // c) 3D generation from the best available source: enhanced > cutout (hosted URL, else data URI)
-                RaiseObjectUpdate(obj, SubStages.Generating3D);
+                // c) 3D generation from the best available source: enhanced > cutout (hosted URL, else data URI).
+                // Generate3DAsync raises Generating3D on every attempt.
                 obj.sourceImagePath = sourcePath;
                 obj.modelPath = await Generate3DAsync(media, obj, source, session, ct);
                 obj.sourceImageUrl = source.Url;
@@ -1244,6 +1266,8 @@ namespace SplatPresso
         }
 
         // Generates the object's model into objects/<id>/model.ply|model.glb (one retry on transient errors).
+        // Generating3D is raised at the start of EVERY attempt: a completed job raises Downloading, and a retry after a
+        // failed download/fetch submits a whole new job, which the preview must show as generating again.
         async Awaitable<string> Generate3DAsync(MediaEndpoints media, PlacedObjectResult obj, ImageInput source, PipelineSession session, CancellationToken ct)
         {
             string dest = session.ObjectPath(obj.id, PipelineSession.ModelFileName(m_ActiveRep));
@@ -1251,18 +1275,30 @@ namespace SplatPresso
             {
                 if (source == null)
                     throw new InvalidOperationException("no source image for the splat model");
-                return await WithRetryAsync(src => media.GenerateSplatAsync(src, m_Settings.numGaussians, dest, ct),
+                return await WithRetryAsync(src =>
+                    {
+                        RaiseObjectUpdate(obj, SubStages.Generating3D);
+                        return media.GenerateSplatAsync(src, m_Settings.numGaussians, dest, ct);
+                    },
                     source, 2, SubStages.Generating3D, obj.id, ct);
             }
             if (source != null)
-                return await WithRetryAsync(src => media.GenerateMeshFromImageAsync(src, dest, ct),
+                return await WithRetryAsync(src =>
+                    {
+                        RaiseObjectUpdate(obj, SubStages.Generating3D);
+                        return media.GenerateMeshFromImageAsync(src, dest, ct);
+                    },
                     source, 2, SubStages.Generating3D, obj.id, ct);
 
             string desc = obj.descriptionForEdit;
             string prompt = string.IsNullOrWhiteSpace(desc) || string.Equals(desc.Trim(), obj.name, StringComparison.OrdinalIgnoreCase)
                 ? obj.name
                 : obj.name + ". " + desc;
-            return await WithRetryAsync(_ => media.GenerateMeshFromTextAsync(prompt, dest, ct),
+            return await WithRetryAsync(_ =>
+                {
+                    RaiseObjectUpdate(obj, SubStages.Generating3D);
+                    return media.GenerateMeshFromTextAsync(prompt, dest, ct);
+                },
                 null, 2, SubStages.Generating3D, obj.id, ct);
         }
 

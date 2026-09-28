@@ -519,7 +519,8 @@ namespace SplatPresso.Voice
             List<ChatContentPart> parts, CancellationToken ct)
         {
             // voice turns are not part of a run's budget: no ledger
-            var chat = new GenpressoChatClient(s.apiBaseUrl, key, null);
+            // A voice turn should fail fast on rate limits instead of going quiet for up to a minute.
+            var chat = new GenpressoChatClient(s.apiBaseUrl, key, null) { MaxRateLimitWaitSec = 15f };
             return await chat.CompleteJsonAsync<VoiceTurnResponse>(s.chatModel, system, history, parts,
                 VoicePromptLibrary.BuildChatSchema(), VoicePromptLibrary.ChatSchemaName, s.chatTimeoutSec, ct, s.chatFallbackModel);
         }
@@ -588,6 +589,7 @@ namespace SplatPresso.Voice
 
             var creates = new List<PlacementRequest>();
             bool cancel = false;
+            int droppedCreates = 0;
             if (response.actions != null)
             {
                 foreach (var a in response.actions)
@@ -611,15 +613,27 @@ namespace SplatPresso.Voice
                     }
                     var request = a.ToPlacementRequest(out string reason);
                     if (request != null)
+                    {
                         creates.Add(request);
+                    }
                     else
+                    {
+                        droppedCreates++;
                         Debug.LogWarning($"[SplatPresso] Voice turn: dropped a create action ({reason})");
+                    }
                 }
             }
 
-            // 1. history (text-only rewrite of this turn)
+            // the model's reply announces a creation, but nothing valid remains to start: do not claim it started
+            if (droppedCreates > 0 && creates.Count == 0)
+            {
+                reply = "Sorry, I couldn't work out what to create. Please try again.";
+                response.reply = reply;
+            }
+
+            // 1. history (text-only rewrite of this turn; the assistant side records what was actually said and done)
             AppendHistory(VoicePromptLibrary.HistoryUserText(notices, transcript, typed),
-                VoicePromptLibrary.HistoryAssistantText(reply, creates, cancel), s);
+                VoicePromptLibrary.HistoryAssistantText(reply, creates, cancel, transcript), s);
 
             // 2. transcript
             LastTranscript = transcript;

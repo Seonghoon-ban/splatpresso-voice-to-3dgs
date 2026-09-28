@@ -308,19 +308,28 @@ namespace SplatPresso.Api
         }
 
         // Output URLs are downloaded right away and retried on transient errors: the job is already paid for, so
-        // a flaky download must not bubble up and make the caller re-submit it.
+        // a flaky download must not bubble up and make the caller re-submit it. Waits grow (2 s, 4 s, 8 s) and so does
+        // the timeout (UnityWebRequest.timeout covers the WHOLE transfer, so a big .ply on a slow link needs more).
+        // A download that still fails is rethrown as NON-retryable (see OutputUnavailable).
+        const int kDownloadAttempts = 4;
+
+        int DownloadTimeoutSec(int attempt) => Mathf.Max(10, m_Settings.downloadTimeoutSec) * (attempt + 1);
+
         async Awaitable<byte[]> DownloadBytesAsync(string url, CancellationToken ct)
         {
             for (int attempt = 0; ; attempt++)
             {
                 try
                 {
-                    return await HttpJson.GetBytesAsync(url, null, m_Settings.downloadTimeoutSec, ct);
+                    return await HttpJson.GetBytesAsync(url, null, DownloadTimeoutSec(attempt), ct);
                 }
-                catch (GenpressoException e) when (e.Retryable && attempt < 2)
+                catch (GenpressoException e) when (IsTransientDownloadFailure(e) && attempt + 1 < kDownloadAttempts)
                 {
-                    Debug.LogWarning($"[SplatPresso] Download failed ({e.Message}); retrying");
-                    await HttpJson.DelayAsync(1f + attempt, ct);
+                    await WaitBeforeDownloadRetryAsync(e, attempt, ct);
+                }
+                catch (GenpressoException e)
+                {
+                    throw OutputUnavailable(e);
                 }
             }
         }
@@ -331,15 +340,47 @@ namespace SplatPresso.Api
             {
                 try
                 {
-                    await HttpJson.DownloadFileAsync(url, destPath, null, m_Settings.downloadTimeoutSec, ct);
+                    await HttpJson.DownloadFileAsync(url, destPath, null, DownloadTimeoutSec(attempt), ct);
                     return;
                 }
-                catch (GenpressoException e) when (e.Retryable && attempt < 2)
+                catch (GenpressoException e) when (IsTransientDownloadFailure(e) && attempt + 1 < kDownloadAttempts)
                 {
-                    Debug.LogWarning($"[SplatPresso] Download failed ({e.Message}); retrying");
-                    await HttpJson.DelayAsync(1f + attempt, ct);
+                    await WaitBeforeDownloadRetryAsync(e, attempt, ct);
+                }
+                catch (GenpressoException e)
+                {
+                    throw OutputUnavailable(e);
                 }
             }
+        }
+
+        // Network / 408 / 429 / 5xx, plus a transfer that broke off after the headers arrived (a whole-request
+        // timeout mid-body reports the 2xx status of the response it was reading).
+        static bool IsTransientDownloadFailure(GenpressoException e) =>
+            e.Retryable || (e.StatusCode >= 200 && e.StatusCode < 300);
+
+        static async Awaitable WaitBeforeDownloadRetryAsync(GenpressoException e, int attempt, CancellationToken ct)
+        {
+            float delay = e.RetryAfterSec > 0f ? Mathf.Min(e.RetryAfterSec, 30f) : 2f * (1 << attempt); // 2 s, 4 s, 8 s
+            Debug.LogWarning($"[SplatPresso] Download failed ({e.Message}); retry {attempt + 1}/{kDownloadAttempts - 1} in {delay:F0}s");
+            await HttpJson.DelayAsync(delay, ct);
+        }
+
+        // The output of a completed (already billed) job could not be downloaded. Never retryable: retrying the step
+        // would re-submit the job and pay again. Status 0 so it is not mistaken for a rejected input URL
+        // (PlacementOrchestrator.IsHostedUrlRejected), and never Unauthorized: output URLs are fetched without a key,
+        // so a 401/403 is the host refusing the URL (expired, access rule), not a bad GenPresso key.
+        static GenpressoException OutputUnavailable(GenpressoException e)
+        {
+            long status = e.StatusCode;
+            bool rejected = status == 401 || status == 402 || status == 403 || status == 404 || status == 410;
+            if (rejected)
+                return new GenpressoException(
+                    $"The output URL of a completed media job was rejected by its host (HTTP {status}); it may have expired. Not re-submitting the job.",
+                    GenpressoErrorKind.NotFound, 0, null, retryable: false, inner: e);
+            return new GenpressoException(
+                $"The output of a completed media job could not be downloaded ({e.Message}); not re-submitting the job.",
+                GenpressoErrorKind.Network, 0, null, retryable: false, inner: e);
         }
 
         static long Base64Length(long byteCount) => (byteCount + 2) / 3 * 4;

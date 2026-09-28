@@ -17,8 +17,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - 모델 라우팅(`ModelRoute`): 단계마다 GenPresso 후보 경로를 순서대로 시도하고 성공한 경로를 7일간 캐시. 모두 없으면 `FAL_KEY`로 fal.ai 대체 실행.
 - 미디어 큐 클라이언트: `status_url`/`response_url`/`cancel_url` 그대로 사용, `Retry-After` 존중, 결과가 늦게 오는 구간(200 "in progress") 재시도, COMPLETED 뒤 결과 422 처리, 타임아웃·취소 시 원격 취소 요청, 4 MB 본문 가드.
 - 추정 크레딧 기반 런별 비용 원장과 상한(`maxCostPerRun`).
-- 의존성 부트스트랩: 렌더러가 없으면 커밋 `2c6fed3`에 고정해 자동 설치(git 없으면 OpenUPM 대안), 배치 모드용 `-splatpressoInstallDeps` / `-splatpressoExitWhenDone`.
-- 에디터 도구: Setup Scene(URP·Render Graph·렌더러 기능 순서·그래픽 API·씬 구성), Create Demo Scene, Project Settings > SplatPresso(키 저장·출처 표시·Test Connection·Probe media models), Debug Window(단계별 리플레이·미리보기·원장), Validate Project + 빌드 전 검사, IL2CPP용 link.xml 생성.
+- 의존성 부트스트랩: 렌더러가 없으면 커밋 `2c6fed3`에 고정해 자동 설치(git 없으면 OpenUPM 대안), 배치 모드용 `-splatpressoInstallDeps` / `-splatpressoExitWhenDone`. 렌더러는 1.1.0 이상(Render Graph 지원)이 필요하며, 그보다 낮은 버전이 이미 설치돼 있으면 본체가 컴파일되지 않고 부트스트랩이 오류와 교체 방법을 알립니다.
+- 에디터 도구: Setup Scene(URP·Render Graph·렌더러 기능 순서·그래픽 API·씬 구성), Create Demo Scene, Project Settings > SplatPresso(키 저장·출처 표시·Test Connection·Test + Probe Media Models), Debug Window(단계별 리플레이·미리보기·원장), Validate Project + 빌드 전 검사, IL2CPP용 link.xml 생성.
 - URP Render Graph 원샷 캡처(RGB + 미터 단위 depth + 카메라 포즈)와 런타임 스플랫 에셋 생성(렌더러 공개 API 사용).
 - 선택 컴포넌트: `FirstPersonCamera`, `FlyCamera`, `DebugHotkeys`, `PlacementNudgeController`, `FocusFrameCap`.
 - 스크립트 API: `SplatPressoRoot.StartRun` / `RunAsync` / `SubmitText` / `StartReplay` / `Cancel`, `runId`가 담긴 이벤트, `RequestGate`.

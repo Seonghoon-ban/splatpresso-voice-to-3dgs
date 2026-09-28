@@ -26,8 +26,10 @@ namespace SplatPresso.EditorTools
         /// <summary>
         /// Builds (or, when interactive, optionally just opens) the demo scene at
         /// <see cref="SplatPressoEditorUtil.DemoScenePath"/>. Returns the scene path, or null when cancelled or failed.
+        /// <paramref name="baseOptions"/> carries the project choices (e.g. the Setup window's opt-outs); only the scene
+        /// fields are overridden. Without it, an interactive build asks before Setup changes project-wide settings.
         /// </summary>
-        public static string Build(bool interactive = true)
+        public static string Build(bool interactive = true, SetupOptions baseOptions = null)
         {
             interactive &= !Application.isBatchMode;
             if (EditorApplication.isPlayingOrWillChangePlaymode)
@@ -35,6 +37,14 @@ namespace SplatPresso.EditorTools
                 Debug.LogWarning("[SplatPresso] Exit play mode before creating the demo scene.");
                 return null;
             }
+            var options = (baseOptions ?? new SetupOptions()).Clone();
+            options.interactive = interactive;
+            options.setupScene = true;
+            options.createCameraIfMissing = false;
+            options.addCameraController = true;
+            options.addSceneToBuildSettings = false;
+            options.saveScenes = false;
+
             string path = SplatPressoEditorUtil.DemoScenePath;
             if (interactive)
             {
@@ -52,6 +62,25 @@ namespace SplatPresso.EditorTools
                         return path;
                     }
                 }
+                if (baseOptions == null)
+                {
+                    // Menu path: nobody chose these project-wide changes yet, and Setup makes them without its own dialog.
+                    var pending = SetupWizard.PendingUnaskedProjectChanges(options);
+                    if (pending.Count > 0)
+                    {
+                        int choice = EditorUtility.DisplayDialogComplex("SplatPresso Demo Scene",
+                            "Creating the demo scene also runs Setup, which changes these project-wide settings:\n\n- " +
+                            string.Join("\n- ", pending) + "\n\nGaussian splats do not render without them. Apply them?",
+                            "Apply", "Cancel", "Skip them");
+                        if (choice == 1)
+                            return null;
+                        if (choice == 2)
+                        {
+                            options.enableRenderGraph = false;
+                            options.fixGraphicsApis = false;
+                        }
+                    }
+                }
             }
 
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
@@ -66,14 +95,7 @@ namespace SplatPresso.EditorTools
                 return null;
             }
 
-            var report = SetupWizard.Run(new SetupOptions
-            {
-                interactive = interactive,
-                createCameraIfMissing = false,
-                addCameraController = true,
-                addSceneToBuildSettings = false,
-                saveScenes = false,
-            });
+            var report = SetupWizard.Run(options);
             if (!EditorSceneManager.SaveScene(scene, path))
                 Debug.LogError("[SplatPresso] Could not save the demo scene to " + path);
             Debug.Log($"[SplatPresso] Demo scene ready: {path}. Press Play, then hold Space and say what to add " +

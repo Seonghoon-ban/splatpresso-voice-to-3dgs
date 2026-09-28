@@ -75,22 +75,22 @@ namespace SplatPresso.EditorTools
                 }
                 EditorGUILayout.Space();
 
-                m_ShowKeys = EditorGUILayout.BeginFoldoutHeaderGroup(m_ShowKeys, "API Keys");
+                // Plain foldouts styled as headers, NOT Begin/EndFoldoutHeaderGroup: the inspector drawn inside a section
+                // shows arrays as reorderable lists, which open their own header group, and Unity refuses nested groups
+                // ("You can't nest Foldout Headers") - every array would be forced collapsed.
+                m_ShowKeys = EditorGUILayout.Foldout(m_ShowKeys, "API Keys", true, EditorStyles.foldoutHeader);
                 if (m_ShowKeys)
                     KeyUI.DrawKeysSection(settings);
-                EditorGUILayout.EndFoldoutHeaderGroup();
                 EditorGUILayout.Space();
 
-                m_ShowConnection = EditorGUILayout.BeginFoldoutHeaderGroup(m_ShowConnection, "Connection");
+                m_ShowConnection = EditorGUILayout.Foldout(m_ShowConnection, "Connection", true, EditorStyles.foldoutHeader);
                 if (m_ShowConnection)
                     DrawConnection(settings);
-                EditorGUILayout.EndFoldoutHeaderGroup();
                 EditorGUILayout.Space();
 
-                m_ShowSettings = EditorGUILayout.BeginFoldoutHeaderGroup(m_ShowSettings, "Settings Asset");
+                m_ShowSettings = EditorGUILayout.Foldout(m_ShowSettings, "Settings Asset", true, EditorStyles.foldoutHeader);
                 if (m_ShowSettings)
                     DrawSettingsAsset(settings, loadable);
-                EditorGUILayout.EndFoldoutHeaderGroup();
             }
             EditorGUILayout.EndScrollView();
             EditorGUIUtility.labelWidth = oldLabelWidth;
@@ -157,6 +157,52 @@ namespace SplatPresso.EditorTools
             EditorGUILayout.LabelField("Sessions folder", sessions, EditorStyles.wordWrappedMiniLabel);
             if (!Directory.Exists(sessions))
                 EditorGUILayout.LabelField(" ", "(created by the first run)", EditorStyles.miniLabel);
+        }
+    }
+
+    /// <summary>
+    /// Inspector for <see cref="SplatPressoSettings"/> (also drawn on Project Settings &gt; SplatPresso): the default
+    /// inspector, except that the optional in-asset GenPresso key is masked like the key section above it (still editable).
+    /// </summary>
+    [CustomEditor(typeof(SplatPressoSettings))]
+    public sealed class SplatPressoSettingsEditor : UnityEditor.Editor
+    {
+        const string kApiKeyProperty = nameof(SplatPressoSettings.apiKey);
+
+        /// <inheritdoc/>
+        public override void OnInspectorGUI()
+        {
+            // Same iteration as DrawDefaultInspector (decorators, tooltips and arrays come from PropertyField).
+            serializedObject.UpdateIfRequiredOrScript();
+            var it = serializedObject.GetIterator();
+            for (bool enter = true; it.NextVisible(enter); enter = false)
+            {
+                if (it.propertyPath == "m_Script")
+                {
+                    using (new EditorGUI.DisabledScope(true))
+                        EditorGUILayout.PropertyField(it, true);
+                }
+                else if (it.propertyPath == kApiKeyProperty && it.propertyType == SerializedPropertyType.String)
+                {
+                    DrawSecret(it);
+                }
+                else
+                {
+                    EditorGUILayout.PropertyField(it, true);
+                }
+            }
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        static void DrawSecret(SerializedProperty p)
+        {
+            var rect = EditorGUILayout.GetControlRect(true, EditorGUIUtility.singleLineHeight);
+            var label = EditorGUI.BeginProperty(rect, new GUIContent(p.displayName, p.tooltip), p);
+            EditorGUI.BeginChangeCheck();
+            string value = EditorGUI.PasswordField(rect, label, p.stringValue);
+            if (EditorGUI.EndChangeCheck())
+                p.stringValue = value;
+            EditorGUI.EndProperty();
         }
     }
 }

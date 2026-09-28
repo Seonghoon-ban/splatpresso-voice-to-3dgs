@@ -91,7 +91,7 @@ namespace SplatPresso
         {
             if (!Directory.Exists(sessionsRoot))
                 return null;
-            return Directory.GetDirectories(sessionsRoot).OrderBy(d => d, StringComparer.Ordinal).LastOrDefault();
+            return Directory.GetDirectories(sessionsRoot).Where(LooksLikeSessionDir).OrderBy(d => d, StringComparer.Ordinal).LastOrDefault();
         }
 
         /// <summary>All session directories under the active root, newest first.</summary>
@@ -102,7 +102,17 @@ namespace SplatPresso
         {
             if (!Directory.Exists(sessionsRoot))
                 return Array.Empty<string>();
-            return Directory.GetDirectories(sessionsRoot).OrderByDescending(d => d, StringComparer.Ordinal).ToArray();
+            return Directory.GetDirectories(sessionsRoot).Where(LooksLikeSessionDir).OrderByDescending(d => d, StringComparer.Ordinal).ToArray();
+        }
+
+        /// <summary>
+        /// True when the folder name has the session format <c>yyyyMMdd_HHmmss</c> (optionally <c>_n</c>). The
+        /// sessions root is user-configurable, so unrelated folders there must never be listed, replayed or deleted.
+        /// </summary>
+        public static bool LooksLikeSessionDir(string dir)
+        {
+            string name = Path.GetFileName(dir?.TrimEnd('/', '\\') ?? "");
+            return System.Text.RegularExpressions.Regex.IsMatch(name, @"^\d{8}_\d{6}(_\d+)?$");
         }
 
         // ---- paths ----

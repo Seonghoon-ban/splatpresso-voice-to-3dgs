@@ -438,6 +438,14 @@ namespace SplatPresso
                 Debug.LogWarning("[SplatPresso] No session directory to replay");
                 return false;
             }
+            // Two orchestrators on one folder would overwrite each other's artifacts and ledger (and the replay would
+            // discard the live run's caches); both would also report the same run id.
+            if (IsSessionRunning(sessionDir))
+            {
+                Debug.LogWarning($"[SplatPresso] Session {sessionDir} is still running; replay refused");
+                Narrate("That generation is still running.");
+                return false;
+            }
             if (from != StartStage.Place && !CheckKeys(out string keyProblem))
             {
                 Debug.LogError("[SplatPresso] " + keyProblem);
@@ -474,6 +482,26 @@ namespace SplatPresso
                 sourceUtterance = null,
             }, nameof(RunStarted));
             return true;
+        }
+
+        // True when an active run works in sessionDir. SessionDir is set synchronously when a run starts, before its
+        // first await, so a run started earlier in the same frame is already covered.
+        bool IsSessionRunning(string sessionDir)
+        {
+            string target = NormalizeDir(sessionDir);
+            foreach (var orch in m_ActiveRuns)
+            {
+                if (!string.IsNullOrEmpty(orch.SessionDir) &&
+                    string.Equals(NormalizeDir(orch.SessionDir), target, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        static string NormalizeDir(string dir)
+        {
+            try { return System.IO.Path.GetFullPath(dir).TrimEnd('/', '\\'); }
+            catch (Exception) { return dir.TrimEnd('/', '\\'); }
         }
 
         bool PrepareForRun()

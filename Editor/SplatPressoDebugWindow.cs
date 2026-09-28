@@ -32,6 +32,8 @@ namespace SplatPresso.EditorTools
             public string dir;
             public bool capture, request, decision, edited, verification, result;
             public bool direct;
+            /// <summary>A session folder Delete may remove (checked when loaded, re-checked before deleting).</summary>
+            public bool deletable;
             public string modeText, representationText;
             public List<string> objectDirs = new List<string>();
             public CostLedger ledger;
@@ -140,7 +142,7 @@ namespace SplatPresso.EditorTools
 
         void RefreshSessions()
         {
-            m_Dirs = PipelineSession.ListSessionDirs(SessionsRoot);
+            m_Dirs = PipelineSession.ListSessionDirs(SessionsRoot).Where(IsSessionFolderName).ToArray();
             m_Names = m_Dirs.Select(Path.GetFileName).ToArray();
             if (string.IsNullOrEmpty(m_SelectedDir) || !m_Dirs.Contains(m_SelectedDir))
                 m_SelectedDir = m_Dirs.Length > 0 ? m_Dirs[0] : null;
@@ -300,8 +302,8 @@ namespace SplatPresso.EditorTools
                 {
                     if (GUILayout.Button("Open Folder", GUILayout.Width(88)))
                         EditorUtility.RevealInFinder(m_SelectedDir);
-                    bool running = m_Info != null && m_Runs.TryGetValue(Path.GetFileName(m_Info.dir), out var r) && !r.finished;
-                    using (new EditorGUI.DisabledScope(running))
+                    bool running = m_Info != null && IsSessionRunning(root, m_Info.dir);
+                    using (new EditorGUI.DisabledScope(running || m_Info == null || !m_Info.deletable))
                     {
                         if (GUILayout.Button("Delete", GUILayout.Width(56)))
                             DeleteSelectedSession();
@@ -444,11 +446,86 @@ namespace SplatPresso.EditorTools
             EditorGUILayout.LabelField("Session total", $"{ledger.LifetimeCost:0.###} credits (estimates, not a bill)", EditorStyles.boldLabel);
         }
 
+        // Session folders are named yyyyMMdd_HHmmss[_n] by PipelineSession.CreateNew. sessionsFolder accepts any path,
+        // so a root pointed at an existing folder (a project, Documents/...) must not list or delete its other folders.
+        static bool IsSessionFolderName(string dir)
+        {
+            string name = Path.GetFileName(dir?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrEmpty(name) || name.Length < 15 || name[8] != '_')
+                return false;
+            for (int i = 0; i < name.Length; i++)
+            {
+                if (i == 8)
+                    continue;
+                if (i == 15)
+                {
+                    // optional "_<n>" collision suffix
+                    if (name[15] != '_' || name.Length == 16)
+                        return false;
+                    continue;
+                }
+                if (name[i] < '0' || name[i] > '9')
+                    return false;
+            }
+            return true;
+        }
+
+        static string NormalizeDir(string dir) =>
+            Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        // Delete only a session-named folder directly under the sessions root that holds session artifacts (or nothing).
+        static bool IsDeletableSession(string dir)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir) || !IsSessionFolderName(dir))
+                    return false;
+                string parent = Path.GetDirectoryName(NormalizeDir(dir));
+                if (parent == null || !string.Equals(parent, NormalizeDir(SessionsRoot), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                string P(string name) => Path.Combine(dir, name);
+                return File.Exists(P(PipelineSession.LedgerJson)) || File.Exists(P(PipelineSession.RequestJson)) ||
+                       File.Exists(P(PipelineSession.CaptureMetaJson)) || File.Exists(P(PipelineSession.ModeTxt)) ||
+                       Directory.Exists(P(PipelineSession.ObjectsDir)) || !Directory.EnumerateFileSystemEntries(dir).Any();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        // The live view can miss a run (window opened mid-run, cleared list), so the root's active runs are checked too.
+        bool IsSessionRunning(SplatPressoRoot root, string dir)
+        {
+            if (string.IsNullOrEmpty(dir))
+                return false;
+            if (m_Runs.TryGetValue(Path.GetFileName(dir), out var r) && !r.finished)
+                return true;
+            if (root == null)
+                return false;
+            try
+            {
+                string target = NormalizeDir(dir);
+                return root.ActiveRuns.Any(o => o != null && !string.IsNullOrEmpty(o.SessionDir) &&
+                                                string.Equals(NormalizeDir(o.SessionDir), target, StringComparison.OrdinalIgnoreCase));
+            }
+            catch (Exception)
+            {
+                return true; // unknown: keep Delete disabled
+            }
+        }
+
         void DeleteSelectedSession()
         {
             string dir = m_SelectedDir;
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 return;
+            if (!IsDeletableSession(dir) || IsSessionRunning(FindRoot(), dir))
+            {
+                EditorUtility.DisplayDialog("Delete session", $"{dir}\nis not an idle SplatPresso session folder directly under the sessions root; " +
+                                                              "not deleted.", "OK");
+                return;
+            }
             if (!EditorUtility.DisplayDialog("Delete session", $"Delete {Path.GetFileName(dir)} and all its artifacts?\n{dir}", "Delete", "Cancel"))
                 return;
             ClearThumbs();
@@ -490,6 +567,7 @@ namespace SplatPresso.EditorTools
                 edited = File.Exists(P(PipelineSession.EditedJpg)),
                 verification = File.Exists(P(PipelineSession.VerificationJson)),
                 result = File.Exists(P(PipelineSession.ResultJson)),
+                deletable = IsDeletableSession(dir),
             };
             info.modeText = ReadText(P(PipelineSession.ModeTxt))?.Trim();
             info.representationText = ReadText(P(PipelineSession.RepresentationTxt))?.Trim();
@@ -622,6 +700,14 @@ namespace SplatPresso.EditorTools
             if (info == null)
                 return;
             var run = GetRun(info.runId);
+            // A replay reuses its session's folder name as run id, so a finished view of that session is live again.
+            run.finished = false;
+            run.outcome = null;
+            run.stage = PlacementStage.Idle;
+            run.done = run.total = 0;
+            run.cost = 0;
+            m_RunOrder.Remove(run.runId);
+            m_RunOrder.Add(run.runId);
             run.message = $"{info.mode}, {info.representation}" + (string.IsNullOrEmpty(info.sourceUtterance) ? "" : $" - \"{info.sourceUtterance}\"");
             m_LastEvent = "Started " + info.runId;
             RefreshSessions();

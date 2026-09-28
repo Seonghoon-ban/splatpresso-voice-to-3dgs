@@ -594,7 +594,8 @@ namespace SplatPresso.Voice
             if (handsFree)
             {
                 Fill(rect, new Color(0f, 0f, 0f, 0.55f));
-                GUI.Label(titleRect, voiceAgent.IsBusy ? "Thinking" + Dots() : "Listening (hands-free)", m_TitleStyle);
+                GUI.Label(titleRect, voiceAgent.IsBusy ? "Thinking" + Dots()
+                    : voiceAgent.IsRecording ? "Listening (hands-free)" : "Microphone not capturing", m_TitleStyle);
                 DrawLevelBar(new Rect(x + 30f, y + ph - 14f, pw - 60f, 7f), voiceAgent.MicLevel);
                 return y;
             }
