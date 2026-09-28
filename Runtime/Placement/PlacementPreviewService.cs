@@ -66,6 +66,7 @@ namespace SplatPresso.Placement
             public Vector3 targetGroundPos; // boxes glide here (refined as better data arrives)
             public Quaternion targetRot;
             public CaptureResult capture;   // this run's capture, for mask-based refinement
+            public ObjectShape shape;       // box shape for the wall standoff (refinement)
         }
 
         static readonly int s_BaseColorId = Shader.PropertyToID("_BaseColor");
@@ -109,16 +110,21 @@ namespace SplatPresso.Placement
                 if (obj == null || obj.status == ObjectStatus.Skipped || m_Previews.ContainsKey(obj))
                     continue;
                 bool isMesh = obj.representation == ObjectRepresentation.Mesh;
-                // same solver as the final placement, but with unit content bounds so uniformScale comes back as
-                // (approx object height * scale factor)
-                var sol = SplatPlacement.Solve(capture, obj.BboxGenerated, obj.sizeHintM, null, null, Vector3.one, tuning, isMesh);
-                if (!sol.valid)
-                    continue;
-                float h = Mathf.Clamp(sol.uniformScale / Mathf.Max(SplatPlacement.ScaleFactor(tuning, isMesh), 1e-3f), 0.05f, 10f);
                 var bbox = obj.BboxGenerated;
                 float aspect = Mathf.Clamp(bbox.h > 1e-4f ? (bbox.w * capture.width) / (bbox.h * capture.height) : 1f, 0.25f, 3f);
+                // With unit content bounds uniformScale = height * sf; this shape puts the box's back face (half of its
+                // 0.8 * width depth) at the wall standoff when the object snaps to a wall.
+                float sf = Mathf.Max(SplatPlacement.ScaleFactor(tuning, isMesh), 1e-3f);
+                var shape = new ObjectShape { valid = true, backExtent = 0.4f * aspect / sf, frontExtent = 0.4f * aspect / sf, width = aspect / sf };
+                // same solver as the final placement, but with unit content bounds so uniformScale comes back as
+                // (approx object height * scale factor)
+                var sol = SplatPlacement.Solve(capture, obj.BboxGenerated, obj.sizeHintM, null, null, Vector3.one, tuning, isMesh,
+                    OrientationInputs.From(obj, shape));
+                if (!sol.valid)
+                    continue;
+                float h = Mathf.Clamp(sol.uniformScale / sf, 0.05f, 10f);
                 var size = new Vector3(h * aspect, h, h * aspect * 0.8f);
-                CreatePreview(obj, capture, sol.position, BoxRotation(sol.rotation, tuning, isMesh), size, isMesh);
+                CreatePreview(obj, capture, sol.position, BoxRotation(sol.rotation, tuning, isMesh), size, isMesh, shape);
                 UpdateObject(obj, obj.status == ObjectStatus.Ready ? "ready" : "queued");
             }
         }
@@ -201,7 +207,8 @@ namespace SplatPresso.Placement
                 if (mask == null)
                     return;
                 var tuning = Tuning;
-                var sol = SplatPlacement.Solve(p.capture, obj.BboxGenerated, obj.sizeHintM, null, mask, Vector3.one, tuning, p.isMesh);
+                var sol = SplatPlacement.Solve(p.capture, obj.BboxGenerated, obj.sizeHintM, null, mask, Vector3.one, tuning, p.isMesh,
+                    OrientationInputs.From(obj, p.shape));
                 if (!sol.valid)
                     return;
                 p.targetGroundPos = sol.position;
@@ -390,7 +397,8 @@ namespace SplatPresso.Placement
                 m.SetColor(s_ColorId, c);
         }
 
-        void CreatePreview(PlacedObjectResult obj, CaptureResult capture, Vector3 groundPos, Quaternion rotation, Vector3 size, bool isMesh)
+        void CreatePreview(PlacedObjectResult obj, CaptureResult capture, Vector3 groundPos, Quaternion rotation, Vector3 size, bool isMesh,
+            ObjectShape shape)
         {
             EnsureMaterials();
             if (m_EdgeMat == null)
@@ -437,6 +445,7 @@ namespace SplatPresso.Placement
                 targetGroundPos = groundPos,
                 targetRot = rotation,
                 capture = capture,
+                shape = shape,
             };
         }
 

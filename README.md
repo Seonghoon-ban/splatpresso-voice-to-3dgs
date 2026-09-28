@@ -59,8 +59,23 @@
               ⑤ 객체별   사용자가 말한 설명만으로 오브젝트 이미지 생성 (text-to-image)
           │
  ⑥ 3D        Splat: TripoSplat → model.ply    |    Mesh(실험적): Rodin → model.glb
- ⑦ Place     캡처 depth + 객체 마스크 + 생성 depth → 월드 위치·크기·yaw → 씬에 스폰
+ ⑦ Place     캡처 depth + 객체 마스크 + 생성 depth → 월드 위치·크기·방향(벽 인식) → 씬에 스폰
 ```
+
+- **물체 방향 (`placement.orientationMode = SceneAware`, 기본)**: 벽에 거는 물체(그림·액자·거울·시계·TV·박제 등)와
+  벽에 붙는 가구(책장·수납장·TV장·옷장·책상·침대 등)는 캡처 depth에서 **물체 뒤의 벽 평면**을 찾아 벽과 평행하게 돌리고,
+  뒷면을 벽에 1 cm 간격으로 붙입니다. 판단에는 VLM 힌트(VERIFY가 편집 이미지를 보고 "벽에 걸림 / 벽에 붙음"을 알려줌)와
+  depth 기하 검사(벽이 충분히 크고, 물체 바로 뒤에 있고, 창문·거울이 아니고, 너무 비스듬하지 않음)가 **둘 다** 맞아야 하며,
+  하나라도 아니면 예전처럼 사용자를 바라봅니다(그래서 지금보다 나빠지지 않습니다). 의자·화분·램프·러그처럼 벽과 무관한 물체는
+  계속 사용자를 봅니다.
+  - 이미지→3D 모델(TripoSplat)은 그림·액자 같은 **평평한 벽 장식에도 두꺼운 뒷면을 지어내는** 경우가 많습니다(실측: 액자가
+    폭만큼 두껍게 생성). 그런 물체는 벽에서 최대 `wallMaxStandoffM`(0.30 m)까지만 띄우고 나머지 뒷부분은 벽 속으로 들어갑니다
+    (메시로 된 벽은 가려 주지만, 3DGS로 된 벽은 가려 주지 못합니다). 두께를 눌러 평평하게 만드는 방법은 그림이 번져 보여서
+    쓰지 않습니다.
+  - 되돌리기: `orientationMode = CameraFacing`(예전 동작과 완전히 같음). `Shadow`는 계산만 하고 로그에 남깁니다.
+  - 근거는 콘솔의 `Orient '<이름>' rule=Wall …` 줄, `result.json`의 물체별 `placement`, 선택한 물체의 기즈모(벽 = 청록,
+    예전 방향 = 빨강, 적용 방향 = 초록)로 확인할 수 있습니다. **SplatPresso > Diagnostics > Orientation Replay…** 로 저장된
+    세션을 API 호출 없이 다시 풀어 볼 수 있습니다.
 
 - 배치할 위치가 정해지면 그 자리에 **반투명 홀로그램 박스**가 먼저 나타나 객체별 진행률을 보여주고,
   완성되면 실제 스플랫으로 바뀝니다.
@@ -96,7 +111,7 @@ Unity 에디터에서 `Window > Package Manager` → `+` → **Add package from 
 https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs.git
 ```
 
-버전을 고정하려면 뒤에 `#v0.3.0`처럼 태그를 붙입니다.
+버전을 고정하려면 뒤에 `#v0.4.0`처럼 태그를 붙입니다.
 
 **설치하면 이렇게 진행됩니다.**
 
@@ -450,6 +465,7 @@ GenPresso는 **작업이 끝난 뒤 실제 사용량으로** 크레딧을 차감
 | 렌더링·캡처가 모두 안 됨 | Render Graph Compatibility Mode가 켜져 있음 | Setup Scene이 끕니다. 수동: Project Settings > Graphics > URP > Render Graph의 Compatibility Mode 해제 |
 | 캡처 실패 "MSAA" | URP 에셋의 MSAA가 켜져 있음 | URP 에셋 Quality > Anti Aliasing(MSAA)를 Disabled로 |
 | `capture.jpg`가 상하 반전 | 그래픽 API별 readback 방향 | `SplatCaptureFeature.FlipReadbackOverride`를 `true`/`false`로 지정 (아래 코드) |
+| 벽에 걸거나 붙여야 할 물체가 벽과 평행하지 않고 나를 봄 | 벽 판정 게이트 중 하나가 실패(창문·거울·문, 가구에 가려진 벽, 너무 비스듬한 시야), 또는 VLM이 벽 물체로 보지 않음 | 콘솔 `Orient '<이름>' … reject=<이유>` 확인. 벽이 더 잘 보이는 곳에서 다시 요청하거나 "벽에 걸어줘 / 벽에 붙여줘"라고 말하기 |
 | 오브젝트가 눕거나 반대를 보거나 크기가 어긋남 | 3D 모델의 좌표 관례 차이 | `PlacementNudgeController`로 맞춘 뒤 로그의 `Nudge cumulative …` 값을 설정 `placement`에 반영: yaw 누적값을 `yawOffsetDeg`(기본 270)에 더하고, scale 배율을 `uniformScaleFactor`(기본 0.9)에 곱합니다. Mesh는 `meshYawOffsetDeg` / `meshUniformScaleFactor` |
 | `No GenPresso media path for 'imageToSplat' is available (tried: …)` | GenPresso에서 해당 경로를 찾지 못함 | **Test + Probe Media Models** 로 존재하는 경로 확인 → `imageToSplat.genpressoPaths` 맨 앞에 지정. 또는 `FAL_KEY`를 설정해 fal 대체 경로 사용, 또는 N으로 Mesh 모드 |
 | `GenPresso API key is missing…` / HUD의 키 누락 배너 | 키를 찾지 못함 | Project Settings > SplatPresso에서 저장하거나 `GENPRESSO_API_KEY` 설정. 환경 변수는 에디터를 다시 켜야 반영됩니다 |
@@ -574,15 +590,17 @@ depth 캡처는 자체 URP 렌더 패스와 셰이더로 하며, 렌더러 내�
 1.1.0 이상인데 이 필드가 없으면(내부 구조가 바뀐 버전·포크) 시작 시와 **Validate Project** 에서 `GaussianSplatting version mismatch` 오류를 냅니다.
 런타임 스플랫 에셋은 렌더러의 공개 API(`GaussianSplatAsset`)로 만듭니다.
 
-## 검증 상태 (0.3.0)
+## 검증 상태 (0.4.0)
 
 | 항목 | 결과 |
 |---|---|
 | 빈 프로젝트에 git URL 한 줄 설치 → 부트스트랩이 렌더러 자동 설치 → 컴파일 | 6000.0.63f1, 6000.2.6f2 모두 통과 (0.1.1 기준, 에러·경고 0) |
-| EditMode 테스트 (Bbox, 배치 수학, PLY→런타임 에셋, upstream 임포터와 바이트 단위 레이아웃 비교, 키 해석, 에러 파싱, 음성 백엔드 선택·설정 마이그레이션 등) | 100/100 통과 |
+| EditMode 테스트 (Bbox, 배치 수학, **벽 인식 방향: 합성 방·코너·창문·노이즈 depth 등**, PLY→런타임 에셋, upstream 임포터와 바이트 단위 레이아웃 비교, 키 해석, 에러 파싱, 음성 백엔드 선택·설정 마이그레이션 등) | 134/134 통과 (+ 저장된 세션 골든 재생 테스트는 명시적으로 실행: 통과) |
 | PlayMode 테스트 (실제 GPU 렌더 + RGB/depth 캡처, 모의 GenPresso 서버로 Scene-aware·Direct·Mesh 전체 파이프라인, 음성 텍스트 턴, 답변 음성(TTS), 워밍업, 무음 가드, **모의 WebSocket 서버로 OpenAI Realtime 백엔드 19종**: 세션 설정·push-to-talk 순서·스냅샷·도구 호출·거부된 키·재연결·Auto 대체 전환) | 46/46 통과 (+1은 이 PC에 실제 키가 있어 "키 없음" 상황을 만들 수 없어 자동 건너뜀) |
 | Windows 플레이어 빌드 (Mono, Managed Stripping High) | 런타임 에셋·리플렉션 브리지·캡처·전체 파이프라인·**OpenAI Realtime 연결** 정상 |
 | 실제 GenPresso API — 생성 | **통과** (0.1.1) — 한국어 요청 "소파 옆 바닥에 빨간 캠핑 의자 하나 놔줘" → Scene-aware 전체 파이프라인 → TripoSplat 스플랫이 소파 옆 바닥에 배치(약 4.5크레딧 추정), Direct 모드 화분 배치(약 2.8크레딧 추정, 38초) |
+| 물체 방향 (0.4.0) — 저장된 세션 재생 (API 호출 없음) | 137개 물체 중 벽 의도가 있는 18개 중 15개가 벽에 맞춰짐(측정값과 ±3° 이내), 나머지 3개와 벽 의도가 없는 115개는 예전과 비트 단위로 동일. 자유롭게 선 물체가 벽에 잘못 맞춰진 경우 0. 계산 p95 23 ms |
+| 물체 방향 (0.4.0) — 실제 생성 (데모 룸) | "왼쪽 벽에 액자를 하나 걸고, 오른쪽 벽에 붙여서 책장도 하나 놔줘" → 액자 139.2° → 90.0°(왼쪽 벽과 평행), 책장 −138.2° → −90.1°(오른쪽 벽과 평행, 뒷면 1 cm). VERIFY 힌트와 depth 벽 적합 일치. 약 7.5크레딧 |
 | 실제 OpenAI Realtime (0.3.0, 플레이어 빌드, `Auto`) | **통과** — 한국어 음성(24 kHz PCM을 마이크 대신 실시간 속도로 전송): "안녕! 너는 뭘 할 수 있는지…" 인식 0.8초, **답변 음성 1.3~1.6초**. "테이블 위에 작은 화분 하나 놔줘" → `request_placement` 1.4초에 생성 시작, 답변 음성 2.2~2.5초. 한국어로 답변 |
 | 실제 GenPresso API — 음성 (0.2.0) | 통과 — 실제 마이크 한국어 발화 정확히 인식, 답변 텍스트 4.9초, 답변 음성 13.3초 |
 | 실제 GenPresso API — 지연 시간 (0.2.0) | TripoSplat 워밍 상태 약 15초(추론 5초), 워커가 쉬면 1~6.5분 대기. 4분 쉬면 그대로, 8분 쉬면 콜드(5.5분). 과금 없는 워밍업 요청이 워커를 깨우는 것 확인 |

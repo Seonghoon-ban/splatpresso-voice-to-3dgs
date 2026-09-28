@@ -132,6 +132,37 @@ namespace SplatPresso.Tests
         }
 
         [Test]
+        public void LegacyJson_DeserializesWithTheOrientationHintsNull()
+        {
+            // written before 0.4: no against_wall / support / back_against_wall / front_faces / placement
+            var d = JsonUtil.Deserialize<DecidedObject>(
+                "{\"id\":1,\"name\":\"painting\",\"target_bbox_norm\":[0.1,0.2,0.3,0.4],\"size_hint_m\":0.8,\"resting_surface\":\"wall\"}");
+            Assert.AreEqual("wall", d.restingSurface);
+            Assert.IsNull(d.againstWall);
+            var v = JsonUtil.Deserialize<VerifiedObject>("{\"id\":1,\"name\":\"painting\",\"found\":true,\"bbox_norm\":[0.1,0.2,0.3,0.4],\"fully_visible\":true,\"notes\":\"\"}");
+            Assert.IsNull(v.support);
+            Assert.IsNull(v.backAgainstWall);
+            Assert.IsNull(v.frontFaces);
+            var o = JsonUtil.Deserialize<PlacedObjectResult>("{\"id\":1,\"name\":\"painting\",\"restingSurface\":\"wall\",\"plyPath\":\"x.ply\",\"status\":2}");
+            Assert.IsNull(o.againstWall);
+            Assert.IsNull(o.support);
+            Assert.IsNull(o.backAgainstWall);
+            Assert.IsNull(o.frontFaces);
+            Assert.IsNull(o.placement);
+
+            // new fields round-trip; the placement record's vectors are arrays
+            o.againstWall = "yes";
+            o.placement = new PlacementRecord { rule = "Wall", position = new Vector3(1f, 2f, 3f), wallNormal = Vector3.left };
+            var json = JObject.Parse(JsonUtil.Serialize(o));
+            Assert.AreEqual("yes", (string)json["againstWall"]);
+            Assert.AreEqual(JTokenType.Array, json["placement"]["position"].Type);
+            Assert.AreEqual(1, (int)json["placement"]["version"]);
+            var back = JsonUtil.Deserialize<PlacedObjectResult>(json.ToString());
+            Assert.AreEqual("Wall", back.placement.rule);
+            Assert.AreEqual(new Vector3(1f, 2f, 3f), back.placement.position);
+        }
+
+        [Test]
         public void ObjectStatus_NumericValuesAreFrozen()
         {
             Assert.AreEqual(0, (int)ObjectStatus.Pending);

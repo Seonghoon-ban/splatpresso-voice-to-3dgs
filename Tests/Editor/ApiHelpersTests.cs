@@ -158,6 +158,70 @@ namespace SplatPresso.Tests
         {
             StringAssert.Contains("scene-augmentation planner", PlacementDecisionService.DecideSystemPrompt);
             StringAssert.Contains("You compare two images", PlacementDecisionService.VerifySystemPrompt);
+            StringAssert.Contains("scene-augmentation planner", PlacementDecisionService.DecideSystemPromptOrientation);
+            StringAssert.Contains("You compare two images", PlacementDecisionService.VerifySystemPromptOrientation);
+            StringAssert.Contains("against_wall", PlacementDecisionService.DecideSystemPromptOrientation);
+            StringAssert.Contains("back_against_wall", PlacementDecisionService.VerifySystemPromptOrientation);
+            StringAssert.Contains("front_faces", PlacementDecisionService.VerifySystemPromptOrientation);
+        }
+
+        static List<string> PropertyNames(JObject strictObject) =>
+            ((JObject)strictObject["properties"]).Properties().Select(p => p.Name).ToList();
+
+        [Test]
+        public void Schemas_WithoutOrientation_AreLegacy()
+        {
+            var decide = PlacementDecisionService.BuildDecideSchema(orientation: false);
+            CollectionAssert.AreEqual(new[] { "scene_summary", "feasible", "infeasible_reason", "objects", "edit_prompt" }, PropertyNames(decide));
+            CollectionAssert.AreEqual(new[]
+            {
+                "id", "name", "description_for_image_edit", "description_for_segmentation", "target_bbox_norm", "size_hint_m", "resting_surface",
+            }, PropertyNames((JObject)decide["properties"]["objects"]["items"]));
+
+            var verify = PlacementDecisionService.BuildVerifySchema(orientation: false);
+            CollectionAssert.AreEqual(new[] { "camera_unchanged", "unexpected_changes", "objects" }, PropertyNames(verify));
+            CollectionAssert.AreEqual(new[] { "id", "name", "found", "bbox_norm", "fully_visible", "notes" },
+                PropertyNames((JObject)verify["properties"]["objects"]["items"]));
+
+            // the default (orientation) schemas only add the hint fields, in a fixed place
+            var dItem = (JObject)PlacementDecisionService.BuildDecideSchema()["properties"]["objects"]["items"];
+            CollectionAssert.AreEqual(new[]
+            {
+                "id", "name", "description_for_image_edit", "description_for_segmentation", "target_bbox_norm", "size_hint_m", "resting_surface",
+                "against_wall",
+            }, PropertyNames(dItem));
+            CollectionAssert.AreEqual(new[] { "yes", "no" }, ((JArray)dItem["properties"]["against_wall"]["enum"]).Select(t => (string)t).ToList());
+            var vItem = (JObject)PlacementDecisionService.BuildVerifySchema()["properties"]["objects"]["items"];
+            CollectionAssert.AreEqual(new[] { "id", "name", "found", "bbox_norm", "fully_visible", "support", "back_against_wall", "front_faces", "notes" },
+                PropertyNames(vItem));
+            CollectionAssert.AreEqual(new[] { "floor", "table_or_furniture", "wall_mounted", "other" },
+                ((JArray)vItem["properties"]["support"]["enum"]).Select(t => (string)t).ToList());
+        }
+
+        [Test]
+        public void Prompts_WithoutOrientation_AreLegacyConstants()
+        {
+            Assert.AreSame(PlacementDecisionService.DecideSystemPrompt, PlacementDecisionService.DecidePromptFor(false));
+            Assert.AreSame(PlacementDecisionService.VerifySystemPrompt, PlacementDecisionService.VerifyPromptFor(false));
+            Assert.AreSame(PlacementDecisionService.DecideSystemPromptOrientation, PlacementDecisionService.DecidePromptFor(true));
+            Assert.AreSame(PlacementDecisionService.VerifySystemPromptOrientation, PlacementDecisionService.VerifyPromptFor(true));
+
+            // the orientation prompts are the legacy text with only the planned edits
+            const string legacyRule = "resting plausibly on a visible support surface (ground, table). Prefer";
+            const string sizeLine = "- size_hint_m is the object's largest real-world dimension in meters.\n";
+            StringAssert.Contains(legacyRule, PlacementDecisionService.DecideSystemPrompt);
+            string expectedDecide = PlacementDecisionService.DecideSystemPrompt
+                .Replace(legacyRule, "resting plausibly on a visible support surface (ground, table) or hanging on a visible wall. Prefer");
+            int at = expectedDecide.IndexOf(sizeLine, StringComparison.Ordinal) + sizeLine.Length;
+            string inserted = PlacementDecisionService.DecideSystemPromptOrientation.Substring(at,
+                PlacementDecisionService.DecideSystemPromptOrientation.Length - expectedDecide.Length);
+            StringAssert.StartsWith("- resting_surface: 'wall' ONLY", inserted);
+            Assert.AreEqual(expectedDecide.Insert(at, inserted), PlacementDecisionService.DecideSystemPromptOrientation);
+
+            const string verifyTail = "Output ONLY JSON matching the schema.";
+            string verifyHead = PlacementDecisionService.VerifySystemPrompt.Substring(0, PlacementDecisionService.VerifySystemPrompt.Length - verifyTail.Length);
+            StringAssert.StartsWith(verifyHead, PlacementDecisionService.VerifySystemPromptOrientation);
+            StringAssert.EndsWith(verifyTail, PlacementDecisionService.VerifySystemPromptOrientation);
         }
 
         // ------------------------------------------------------------------------------------------
@@ -192,6 +256,19 @@ namespace SplatPresso.Tests
             var dj = JObject.Parse(File.ReadAllText(EditorTestUtil.RequireFixture("decision.json")));
             foreach (var p in ((JObject)PlacementDecisionService.BuildDecideSchema()["properties"]).Properties())
                 Assert.IsNotNull(dj.Property(p.Name), "decision.json lacks " + p.Name);
+            var dObj = (JObject)dj["objects"][0];
+            foreach (var p in ((JObject)PlacementDecisionService.BuildDecideSchema()["properties"]["objects"]["items"]["properties"]).Properties())
+                Assert.IsNotNull(dObj.Property(p.Name), "decision.json objects[0] lacks " + p.Name);
+            var vj = JObject.Parse(File.ReadAllText(EditorTestUtil.RequireFixture("verification.json")));
+            var vObj = (JObject)vj["objects"][0];
+            foreach (var p in ((JObject)PlacementDecisionService.BuildVerifySchema()["properties"]["objects"]["items"]["properties"]).Properties())
+                Assert.IsNotNull(vObj.Property(p.Name), "verification.json objects[0] lacks " + p.Name);
+
+            // the fixture chair is free-standing: the mock pipeline keeps the camera-facing yaw
+            Assert.AreEqual("no", d.againstWall);
+            Assert.AreEqual("floor", v.support);
+            Assert.AreEqual("no", v.backAgainstWall);
+            Assert.AreEqual("toward_viewer", v.frontFaces);
         }
     }
 }

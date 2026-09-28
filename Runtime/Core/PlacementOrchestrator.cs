@@ -432,6 +432,7 @@ namespace SplatPresso
             foreach (var o in result.objects)
             {
                 o.runId = RunId;
+                o.placement = null; // every object is solved again; a stale record must not survive a skip or a cancel
                 string cutout = Path.Combine(session.ObjectDirPath(o.id), PipelineSession.ObjectCutoutPng);
                 if (File.Exists(cutout))
                     o.cutoutPath = cutout;
@@ -612,6 +613,10 @@ namespace SplatPresso
                 // New verified boxes -> cutouts cut with the old ones are stale.
                 InvalidateObjectCachesOnce(session);
                 session.SaveJson(PipelineSession.VerificationJson, verification);
+                if (m_Settings.askVlmForOrientation)
+                    foreach (var vo in verification.objects)
+                        if (vo != null && vo.found)
+                            Debug.Log($"[SplatPresso] Verify orientation: '{vo.name}' support={vo.support ?? "-"} back={vo.backAgainstWall ?? "-"} front={vo.frontFaces ?? "-"}");
             }
             else
             {
@@ -757,6 +762,7 @@ namespace SplatPresso
                 var reused = TryReuseFinishedObject(session, d.id, startAt);
                 if (reused != null)
                 {
+                    reused.againstWall = d.againstWall; // from the current decision, not the cached object.json
                     list.Add(reused);
                     continue;
                 }
@@ -770,6 +776,7 @@ namespace SplatPresso
                     bboxGeneratedNorm = d.targetBboxNorm, // placement anchors on the DECIDED bbox
                     sizeHintM = d.sizeHintM,
                     restingSurface = d.restingSurface ?? "ground",
+                    againstWall = d.againstWall,
                     representation = m_ActiveRep,
                     status = ObjectStatus.Pending,
                     runId = RunId,
@@ -1108,14 +1115,19 @@ namespace SplatPresso
             var list = new List<PlacedObjectResult>(foundObjects.Count);
             foreach (var v in foundObjects)
             {
+                var d = decision.objects.Find(o => o.id == v.id);
                 var reused = TryReuseFinishedObject(session, v.id, startAt);
                 if (reused != null)
                 {
+                    // orientation hints come from the current decision / verification, not the cached object.json
+                    reused.againstWall = d?.againstWall;
+                    reused.support = v.support;
+                    reused.backAgainstWall = v.backAgainstWall;
+                    reused.frontFaces = v.frontFaces;
                     list.Add(reused);
                     continue;
                 }
 
-                var d = decision.objects.Find(o => o.id == v.id);
                 list.Add(new PlacedObjectResult
                 {
                     id = v.id,
@@ -1125,6 +1137,10 @@ namespace SplatPresso
                     bboxGeneratedNorm = v.bboxNorm, // the verified box on the EDITED image
                     sizeHintM = d?.sizeHintM ?? 0f,
                     restingSurface = d?.restingSurface ?? "ground",
+                    againstWall = d?.againstWall,
+                    support = v.support,
+                    backAgainstWall = v.backAgainstWall,
+                    frontFaces = v.frontFaces,
                     representation = m_ActiveRep,
                     status = ObjectStatus.Pending,
                     runId = RunId,

@@ -193,9 +193,13 @@ namespace SplatPresso.Placement
             {
                 Vector3 contentSize = ContentBoundsSize(asset.boundsMax - asset.boundsMin, tuning.contentRotationEuler, tuning.contentScale);
                 bool[] mask = LoadObjectMask(obj.cutoutPath, capture.width, capture.height);
-                var sol = SplatPlacement.Solve(capture, obj.BboxGenerated, obj.sizeHintM, genDepth, mask, contentSize, tuning);
+                obj.placement = null;
+                ObjectShape shape = SplatShape(asset, tuning);
+                var sol = SplatPlacement.Solve(capture, obj.BboxGenerated, obj.sizeHintM, genDepth, mask, contentSize, tuning, false,
+                    OrientationInputs.From(obj, shape));
                 if (!sol.valid)
                     throw new InvalidOperationException($"placement solve failed: {sol.note}");
+                obj.placement = SceneOrientation.ToRecord(sol, tuning, false); // persisted in result.json
 
                 if (previewService != null)
                     previewService.SyncFinal(obj, sol.position, sol.rotation);
@@ -204,7 +208,8 @@ namespace SplatPresso.Placement
                     o => Describe(o, obj, result, sol.note));
                 if (previewService != null)
                     previewService.RemoveFor(obj); // the real object replaces the placeholder
-                Debug.Log($"[SplatPresso] Placed '{obj.name}' at {sol.position} scale {sol.uniformScale:F3} ({sol.note})");
+                Debug.Log($"[SplatPresso] Placed '{obj.name}' at {sol.position} yaw {sol.rotation.eulerAngles.y:F1} scale {sol.uniformScale:F3} ({sol.note})");
+                LogOrientation(obj.name, sol);
                 return go;
             }
             finally
@@ -241,9 +246,14 @@ namespace SplatPresso.Placement
 
                 Vector3 contentSize = ContentBoundsSize(local.size, tuning.meshContentRotationEuler, Vector3.one);
                 bool[] mask = LoadObjectMask(obj.cutoutPath, capture.width, capture.height);
-                var sol = SplatPlacement.Solve(capture, obj.BboxGenerated, obj.sizeHintM, genDepth, mask, contentSize, tuning, isMesh: true);
+                obj.placement = null;
+                // the mesh pivot is centred in X/Z: back = half the depth along the mesh front
+                var shape = ObjectShape.FromCenteredSize(contentSize, SceneOrientation.FrontAxisLocal(tuning.meshYawOffsetDeg));
+                var sol = SplatPlacement.Solve(capture, obj.BboxGenerated, obj.sizeHintM, genDepth, mask, contentSize, tuning, isMesh: true,
+                    orient: OrientationInputs.From(obj, shape));
                 if (!sol.valid)
                     throw new InvalidOperationException($"placement solve failed: {sol.note}");
+                obj.placement = SceneOrientation.ToRecord(sol, tuning, true); // persisted in result.json
 
                 if (previewService != null)
                     previewService.SyncFinal(obj, sol.position, sol.rotation);
@@ -252,7 +262,8 @@ namespace SplatPresso.Placement
                     o => Describe(o, obj, result, sol.note));
                 if (previewService != null)
                     previewService.RemoveFor(obj);
-                Debug.Log($"[SplatPresso] Placed mesh '{obj.name}' at {sol.position} scale {sol.uniformScale:F3} ({sol.note})");
+                Debug.Log($"[SplatPresso] Placed mesh '{obj.name}' at {sol.position} yaw {sol.rotation.eulerAngles.y:F1} scale {sol.uniformScale:F3} ({sol.note})");
+                LogOrientation(obj.name, sol);
                 return go;
             }
             finally
@@ -260,6 +271,33 @@ namespace SplatPresso.Placement
                 if (!consumed)
                     ReleaseHandle(handle);
             }
+        }
+
+        /// <summary>
+        /// Shape of a splat model along its canonical front (back extent from the splat positions, percentiles ignore
+        /// floaters); invalid when the positions are not stored as Float32 (runtime assets always are).
+        /// </summary>
+        public static ObjectShape SplatShape(GaussianSplatAsset asset, PlacementTuning tuning)
+        {
+            if (asset == null || tuning == null || asset.posFormat != GaussianSplatAsset.VectorFormat.Float32 || asset.posData == null)
+                return default;
+            try
+            {
+                return ObjectShape.FromPoints(asset.posData.GetData<float>(), asset.splatCount, tuning.contentRotationEuler,
+                    tuning.contentScale, tuning.yawOffsetDeg);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[SplatPresso] Could not measure the splat shape: {e.Message}");
+                return default;
+            }
+        }
+
+        static void LogOrientation(string name, in SplatPlacement.PlacementSolution sol)
+        {
+            string line = SceneOrientation.Describe(name, sol.orientation);
+            if (line != null)
+                Debug.Log(line);
         }
 
         static void Describe(GeneratedObject o, PlacedObjectResult obj, PlacementResult result, string note)
@@ -276,6 +314,7 @@ namespace SplatPresso.Placement
         {
             obj.status = ObjectStatus.Skipped;
             obj.skipReason = reason;
+            obj.placement = null; // not spawned: no pose record
             if (previewService != null)
                 previewService.RemoveFor(obj);
         }

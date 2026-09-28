@@ -201,6 +201,7 @@ namespace SplatPresso
         [JsonProperty("target_bbox_norm")] public float[] targetBboxNorm; // [x,y,w,h] top-left origin (raw, may be 0-1000)
         [JsonProperty("size_hint_m")] public float sizeHintM;              // largest real-world dimension in meters
         [JsonProperty("resting_surface")] public string restingSurface;    // ground | table | wall | other
+        [JsonProperty("against_wall")] public string againstWall;          // yes | no (null in sessions before 0.4 or with askVlmForOrientation off)
 
         /// <summary>Normalized target box (lenient: tolerates 0-1000 components). Always read the box through this.</summary>
         [JsonIgnore] public Bbox TargetBbox => targetBboxNorm != null && targetBboxNorm.Length == 4 ? Bbox.FromXYWHNormLenient(targetBboxNorm) : default;
@@ -227,6 +228,10 @@ namespace SplatPresso
         [JsonProperty("found")] public bool found;
         [JsonProperty("bbox_norm")] public float[] bboxNorm; // [x,y,w,h] top-left origin (raw, may be 0-1000)
         [JsonProperty("fully_visible")] public bool fullyVisible;
+        // Orientation hints (null in sessions before 0.4, with askVlmForOrientation off, or on verify-fallback)
+        [JsonProperty("support")] public string support;                   // floor | table_or_furniture | wall_mounted | other
+        [JsonProperty("back_against_wall")] public string backAgainstWall; // yes | no | unsure
+        [JsonProperty("front_faces")] public string frontFaces;            // toward_viewer | ... | no_clear_front (logged only)
         [JsonProperty("notes")] public string notes;
 
         /// <summary>Normalized box on the edited image (lenient). Always read the box through this.</summary>
@@ -267,12 +272,74 @@ namespace SplatPresso
         public ObjectStatus status = ObjectStatus.Pending;
         public string skipReason;
         public float segScore;
+        // Orientation hints from DECIDE (againstWall) and VERIFY (the rest); null when the models were not asked.
+        public string againstWall;
+        public string support;
+        public string backAgainstWall;
+        public string frontFaces;
+        /// <summary>Final pose and how its yaw was chosen (set when the object is placed; persisted in result.json).</summary>
+        public PlacementRecord placement;
 
         /// <summary>Run id (session folder name); not persisted.</summary>
         [JsonIgnore] public string runId;
 
         /// <summary>Normalized placement box (lenient). Always read the box through this.</summary>
         [JsonIgnore] public Bbox BboxGenerated => bboxGeneratedNorm != null && bboxGeneratedNorm.Length == 4 ? Bbox.FromXYWHNormLenient(bboxGeneratedNorm) : default;
+    }
+
+    /// <summary>
+    /// The placed pose of one object and how its yaw was chosen (camera-facing or a wall found in the capture depth), for
+    /// inspection, gizmos and offline comparison. Written by <see cref="Placement.SceneOrientation.ToRecord"/>; never
+    /// contains NaN. Angles are world yaw in degrees (atan2(x, z)); "front" is the direction the model's front faces.
+    /// </summary>
+    [Serializable]
+    public class PlacementRecord
+    {
+        public int version = 1;
+        /// <summary><see cref="OrientationMode"/> name (CameraFacing, Shadow, SceneAware).</summary>
+        public string mode;
+        /// <summary>Applied yaw rule: CameraFacing or Wall.</summary>
+        public string rule;
+        /// <summary>Wall intent: Unknown, FreeStanding, Backed or Mounted.</summary>
+        public string intent;
+        /// <summary>Which hint decided the intent (e.g. verify.support, decide.against_wall, category:bookshelf).</summary>
+        public string intentSource;
+        public float cameraYawDeg;
+        public float wallYawDeg;
+        public float appliedFrontYawDeg;
+        public float rotationYawDeg;
+        public float yawOffsetDeg;
+        public bool isMesh;
+        public Vector3 position;
+        public Vector3 legacyPosition;
+        public float uniformScale;
+        public bool flushApplied;
+        public string reanchor;
+        public float shiftM;
+        public float standoffM;
+        public bool standoffClamped;
+        public bool wallFound;
+        public string wallReject;
+        public Vector3 wallNormal;
+        public Vector3 wallPoint;
+        public float wallYMin;
+        public float wallYMax;
+        public int points;
+        public int inliers;
+        public float tau;
+        public float frac;
+        public float ext;
+        public float ySpan;
+        public float behind;
+        public float splitDeg;
+        public float anchorDistM;
+        public float centerErrM;
+        public bool corner;
+        public bool hasVlmFrontYaw;
+        public float vlmFrontYawDeg;
+        public float confidence;
+        public float elapsedMs;
+        public string note;
     }
 
     // ------------------------------------------------------------------------------------------

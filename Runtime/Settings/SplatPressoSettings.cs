@@ -109,6 +109,9 @@ namespace SplatPresso
         public bool useSegmentation = true;
         [Tooltip("Estimate the edited image's depth (used to anchor objects). Off: placement uses box math only.")]
         public bool useDepthEstimation = true;
+        [Tooltip("Ask the planning and verification models whether each object hangs on or stands against a wall (feeds " +
+                 "placement.orientationMode). Off: the previous prompts and schemas, byte for byte.")]
+        public bool askVlmForOrientation = true;
         [Tooltip("Gaussian count requested from TripoSplat (lower = faster/lighter).")]
         [Range(32768, 262144)] public int numGaussians = 262144;
         [Tooltip("Captured RGB is downscaled to this long side before upload (keeps requests under GenPresso's 4 MB cap).")]

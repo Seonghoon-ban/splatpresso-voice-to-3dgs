@@ -133,6 +133,38 @@ Rules the pipeline keeps (all ported from the prototype, see the code comments f
 3. Position = unproject with the **capture-time** pose. Height from the mask's row extent (verify boxes are loose),
    sanity-checked against `size_hint_m`; `uniformScale = height / contentBounds.y · uniformScaleFactor`.
 4. Yaw faces the capture camera horizontally, plus `yawOffsetDeg` (270° for TripoSplat, calibrated). Meshes use the `mesh*` tuning.
+5. Scene-aware orientation (`orientationMode`, default `SceneAware`; `Runtime/Placement/SceneOrientation.cs`). Only the target
+   yaw ψ changes: `rotation = Euler(0, ψ + yawOffset, 0)`, so the offsets and the "front, head-on" enhance prompt stay valid.
+   - **Intent**, first match wins: VERIFY `support = wall_mounted` → Mounted; DECIDE `resting_surface = wall` (unless VERIFY saw
+     it on the floor or furniture) → Mounted; VERIFY `back_against_wall` yes/no → Backed/FreeStanding; DECIDE `against_wall`
+     yes/no → Backed/FreeStanding; only when every hint is missing or unsure, the name list `wallBackedCategories` → Backed.
+     Unknown and FreeStanding keep the camera-facing pose bit for bit (no note).
+   - **Wall fit** on the original capture depth around the object (region at least 1 m wide; above furniture, around wall-hung
+     objects), points in front of the object dropped; vertical-plane RANSAC on XZ (seed 17, 256 iterations, τ = max(3 cm,
+     1 cm/m)) + two PCA refits, normal oriented toward the camera. A roughly perpendicular second surface (corner) is fitted
+     too (seed 29) and its τ band excluded from the first plane's refit and statistics (the adjacent wall would tilt it).
+   - **Gates** (all must pass, first failure = `reject`): inlier fraction ≥ 0.35, width, height span (rejects furniture fronts),
+     points > 0.2 m behind < 15 % (windows, mirrors, openings), split-half angle < 8°, not grazing (cos ≥ 0.15 → never more
+     than 81° from camera-facing), flat content rejected for furniture; distance: wall-hung objects use the wall behind the
+     object's centre (≤ max(0.15 m, 3τ)), furniture −0.15 ≤ d ≤ size/2 + 0.5 m. Corners pick the wall behind the centre
+     (wall-hung) or the nearest wall (furniture); ties go to VERIFY's `front_faces` direction, else to camera-facing (a tie
+     picks the second wall only if it passes the distance gate). A perpendicular second surface that is not accepted as a
+     corner but is nearer (furniture: d, wall-hung: centre error) rejects the rule (`corner-ambiguous`).
+   - **Flush**: wall-hung objects are re-anchored where the ray through the mask centre meets the wall, back offset
+     `min(back extent, 0.30 m) + 1 cm` (back extent from splat-position percentiles, meshes half their depth), pivot half the
+     model height below; furniture moves onto the wall (back + 1 cm), centred on its bottom silhouette along the wall
+     (sideways move ≤ max(0.5 m, 0.75 × width)). Moves of more than `wallMaxShiftM` (1.5 m; wall-hung: the total move,
+     furniture: the move toward the wall along its normal, so the total can be larger with the sideways centring) or outside
+     the distance clamp keep the position (yaw still applies).
+   - `Shadow` computes and logs only; `CameraFacing` (or default `OrientationInputs`) is the pre-0.4 solve, bit for bit.
+     Any exception adds `orient-error:<type>` and keeps the camera-facing pose.
+   - Notes: `yaw:wall(Mounted/verify.support,psi=..,dcam=..,d=..,shift=..,reanchor=center-ray,standoff=..[c])`,
+     `yaw:camera(Backed/category:bookshelf,reject=behind 0.24)`, `yaw:shadow-wall(...)`. The spawn log adds
+     `Orient '<name>' rule=.. cand=.. intent=..` with the fit statistics, and each placed object's `PlacementRecord`
+     (pose, rule, intent, wall fit) is saved as `placement` in `result.json`. Selecting a spawned object draws the wall and the
+     camera / applied / VLM fronts (`orientationGizmos`). The preview boxes use the same rule (their back face sits at the standoff).
+   - DECIDE and VERIFY ask for the hints only with `askVlmForOrientation` (default on; off = the previous prompts and schemas byte
+     for byte). `front_faces` is logged and used for corner tie-breaks only.
 
 The TripoSplat → Unity content fix (`contentRotationEuler` (180,0,0), `contentScale` (1,1,-1)) is applied to the `Content`
 child from settings at spawn time and used for bounds sizing, so the two can never drift apart.
@@ -178,7 +210,7 @@ The run id is the folder name, so logs and events join with artifacts.
 | `objects/<id>/generated.png`, `generated_url.txt` | per object (Direct) | Text-to-image output |
 | `objects/<id>/model.ply` / `model.glb` | per object | TripoSplat splat / Rodin mesh |
 | `objects/<id>/object.json` | per object | `PlacedObjectResult` |
-| `result.json` | before placing | `PlacementResult` |
+| `result.json` | before placing, again after | `PlacementResult`; after placing each object also carries `placement` (`PlacementRecord`: pose, yaw rule, intent, wall fit) |
 | `ledger.json` | every billable call | Append-only history; `TotalCost` counts the current run only |
 
 Replay (`StartReplay(dir, StartStage)`): stages after the entry point are re-run, earlier artifacts are loaded.
@@ -245,7 +277,10 @@ not for accounting; GenPresso bills actual usage at completion.
 
 ## 10. Testing
 
-- **EditMode** (`Tests/Editor`): `Bbox` (lenient 0–1000 parsing, pixel conversion), `SplatPlacement.Solve` on synthetic
+- **EditMode** (`Tests/Editor`): `Bbox` (lenient 0–1000 parsing, pixel conversion), wall-aware orientation on analytic rooms
+  (`SyntheticRoom`: oblique painting, thick model, painting over a sofa, bookshelf, free-standing plant, window, corners,
+  splat-like blocky depth, shadow mode, mesh, no mask, preconditions) and its intent / bucket / axis / shape helpers,
+  `SplatPlacement.Solve` on synthetic
   captures, PLY reading and runtime asset layout/bounds/destroy (with a parity check against the upstream editor creator
   when reachable), `GenpressoError` parsing, voice-turn mapping and clamping, `ApiKeys` resolution order (through a
   test hook for the user-profile path), `ModelRoute` defaults, `JsonUtil` Vector3/Quaternion.
@@ -256,6 +291,11 @@ not for accounting; GenPresso bills actual usage at completion.
      200 "in progress", one 429 with `Retry-After`) and fixture downloads; runs Scene-aware and Direct to completion and asserts
      a spawned `GeneratedObject` with a valid splat asset;
   3. a voice text turn through `GenpressoVoiceBackend` that ends in a completed run.
+- **Session replay** (explicit, `Category("Replay")`): `SessionReplayOrientationTests` replays the saved sessions listed in
+  `SPLATPRESSO_REPLAY_ROOTS` through `Editor/OrientationReplay.cs` and checks `Tests/Editor/Data/orientation_golden.json`
+  (camera-facing rows bit-identical to the legacy solve, wall yaws within 3°, back gap, p95 time). The same replay runs from
+  `SplatPresso > Diagnostics > Orientation Replay…` or in batch (`-executeMethod SplatPresso.EditorTools.OrientationReplay.RunBatch
+  -replayRoots "a;b" [-replayOut file.csv]`); it only reads the sessions and writes a CSV to `Temp/SplatPresso`.
 - **Fixtures** (`Tests/Runtime/Fixtures`) are synthetic and small; regenerate them with `python Tools~/make_fixtures.py`
   (see the script header for options). They never contain real session images or keys.
 - **Running**: add the package to `testables` in the consuming project's `Packages/manifest.json`

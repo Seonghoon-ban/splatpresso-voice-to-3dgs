@@ -86,6 +86,51 @@ namespace SplatPresso.Placement
                 m_Owners.Add(owner);
         }
 
+        // Orientation debug (PlacementTuning.orientationGizmos): the fitted wall (cyan), the camera-facing front (red), the
+        // applied front (green), the vision model's front direction (yellow) and the snap move from the legacy pose (magenta).
+        void OnDrawGizmosSelected()
+        {
+            var rec = source?.placement;
+            if (rec == null || !rec.wallFound)
+                return;
+            var settings = SplatPressoSettings.Active;
+            if (settings != null && settings.placement != null && !settings.placement.orientationGizmos)
+                return;
+
+            Vector3 n = rec.wallNormal;
+            Vector3 tangent = new Vector3(n.z, 0f, -n.x);
+            float half = 0.5f * Mathf.Max(rec.ext, 0.1f);
+            Vector3 a = rec.wallPoint - tangent * half, b = rec.wallPoint + tangent * half;
+            float y0 = rec.wallYMin, y1 = Mathf.Max(rec.wallYMax, rec.wallYMin + 0.05f);
+            Vector3 p00 = new Vector3(a.x, y0, a.z), p01 = new Vector3(a.x, y1, a.z);
+            Vector3 p10 = new Vector3(b.x, y0, b.z), p11 = new Vector3(b.x, y1, b.z);
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawLine(p00, p10);
+            Gizmos.DrawLine(p10, p11);
+            Gizmos.DrawLine(p11, p01);
+            Gizmos.DrawLine(p01, p00);
+            Gizmos.DrawLine(rec.wallPoint, rec.wallPoint + n * 0.25f);
+
+            Vector3 origin = transform.position + Vector3.up * 0.05f;
+            DrawYawArrow(origin, rec.cameraYawDeg, Color.red);
+            DrawYawArrow(origin + Vector3.up * 0.02f, rec.appliedFrontYawDeg, Color.green);
+            if (rec.hasVlmFrontYaw)
+                DrawYawArrow(origin + Vector3.up * 0.04f, rec.vlmFrontYawDeg, Color.yellow);
+            Gizmos.color = Color.magenta;
+            Gizmos.DrawLine(rec.legacyPosition, rec.position);
+        }
+
+        static void DrawYawArrow(Vector3 from, float yawDeg, Color color)
+        {
+            Vector3 dir = Quaternion.Euler(0f, yawDeg, 0f) * Vector3.forward * 0.5f;
+            Vector3 tip = from + dir;
+            Vector3 side = Vector3.Cross(Vector3.up, dir).normalized * 0.06f;
+            Gizmos.color = color;
+            Gizmos.DrawLine(from, tip);
+            Gizmos.DrawLine(tip, tip - dir * 0.2f + side);
+            Gizmos.DrawLine(tip, tip - dir * 0.2f - side);
+        }
+
         void OnDestroy()
         {
             var cb = destroyedCallback;

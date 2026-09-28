@@ -27,6 +27,8 @@ namespace SplatPresso.Placement
             public bool valid;
             /// <summary>"ok", or ";"-joined notes about fallbacks taken (or the reason for failure).</summary>
             public string note;
+            /// <summary>How the yaw was chosen (camera-facing or a wall) and the wall-fit statistics.</summary>
+            public OrientationReport orientation;
         }
 
         /// <summary>
@@ -42,8 +44,11 @@ namespace SplatPresso.Placement
         /// <param name="tuning">Placement tuning (calibration values).</param>
         /// <param name="isMesh">Use the mesh tuning (<see cref="PlacementTuning.meshYawOffsetDeg"/>,
         /// <see cref="PlacementTuning.meshUniformScaleFactor"/>) instead of the splat tuning.</param>
+        /// <param name="orient">Wall-orientation hints and model shape. The default (disabled) keeps the camera-facing
+        /// yaw, bit-identical to the solve before 0.4; see <see cref="PlacementTuning.orientationMode"/>.</param>
         public static PlacementSolution Solve(CaptureResult capture, Bbox bboxNorm, float sizeHintM,
-            float[] genDepthRelative, bool[] objectMask, Vector3 contentBoundsSize, PlacementTuning tuning, bool isMesh = false)
+            float[] genDepthRelative, bool[] objectMask, Vector3 contentBoundsSize, PlacementTuning tuning, bool isMesh = false,
+            OrientationInputs orient = default)
         {
             var sol = new PlacementSolution { rotation = Quaternion.identity, uniformScale = 1f };
             if (capture == null || capture.width <= 0 || capture.height <= 0)
@@ -223,10 +228,59 @@ namespace SplatPresso.Placement
             sol.uniformScale = chosenH / Mathf.Max(contentBoundsSize.y, 1e-4f) * ScaleFactor(tuning, isMesh);
 
             // 6) yaw so the object's +Z faces the camera horizontally, plus the calibrated offset that turns the
-            // generator's "front" toward the camera
+            // generator's "front" toward the camera. Scene-aware: wall-hung / wall-backed objects may instead face out of
+            // a wall found in the capture depth (same formula, other target yaw) and move flush to it.
             Vector3 camPos = capture.cameraPosition;
             float yaw = Mathf.Atan2(camPos.x - pos.x, camPos.z - pos.z) * Mathf.Rad2Deg;
-            sol.rotation = Quaternion.Euler(0f, yaw + YawOffset(tuning, isMesh), 0f);
+            float applied = yaw;
+            var mode = orient.enabled ? tuning.orientationMode : OrientationMode.CameraFacing;
+            sol.orientation = new OrientationReport
+            {
+                mode = mode, cameraYawDeg = yaw, frontYawDeg = yaw, legacyPosition = pos, position = pos,
+                reanchor = "none", intentSource = "",
+            };
+            if (mode != OrientationMode.CameraFacing)
+            {
+                try
+                {
+                    var r = SceneOrientation.Evaluate(new SceneOrientation.Context
+                    {
+                        mode = mode,
+                        capture = capture,
+                        depth = D,
+                        width = W,
+                        height = H,
+                        focal = f,
+                        mask = usedMask ? objectMask : null,
+                        bx0 = bx0, by0 = by0, bx1 = bx1, by1 = by1,
+                        bboxRaw = bboxNorm,
+                        uA = uA, vA = vA, dA = dA,
+                        pos = pos,
+                        chosenH = chosenH,
+                        sizeHintM = sizeHintM,
+                        uniformScale = sol.uniformScale,
+                        contentBoundsSize = contentBoundsSize,
+                        isMesh = isMesh,
+                        tuning = tuning,
+                        inputs = orient,
+                        camYawDeg = yaw,
+                    });
+                    sol.orientation = r;
+                    if (mode == OrientationMode.SceneAware && r.candidate == YawRule.Wall)
+                    {
+                        applied = r.wallYawDeg;
+                        pos = r.position;
+                        sol.orientation.applied = YawRule.Wall;
+                    }
+                    if (!string.IsNullOrEmpty(r.note))
+                        notes.Add(r.note);
+                }
+                catch (Exception e)
+                {
+                    notes.Add("orient-error:" + e.GetType().Name);
+                }
+            }
+            sol.rotation = Quaternion.Euler(0f, applied + YawOffset(tuning, isMesh), 0f);
 
             sol.position = pos;
             sol.valid = true;

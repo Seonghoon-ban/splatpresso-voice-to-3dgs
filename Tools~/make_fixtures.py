@@ -367,6 +367,7 @@ def make_json(out, bounds):
             "target_bbox_norm": bbox,
             "size_hint_m": 0.9,
             "resting_surface": "ground",
+            "against_wall": "no",
         }],
         "edit_prompt": ("Add a red wooden chair with a tall solid backrest standing on the floor in the middle of the room, "
                         "left of the wooden table. Keep everything else exactly the same: same camera angle, same framing, "
@@ -381,6 +382,9 @@ def make_json(out, bounds):
             "found": True,
             "bbox_norm": bbox,
             "fully_visible": True,
+            "support": "floor",
+            "back_against_wall": "no",
+            "front_faces": "toward_viewer",
             "notes": "",
         }],
     }

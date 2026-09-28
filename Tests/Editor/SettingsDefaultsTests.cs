@@ -42,6 +42,45 @@ namespace SplatPresso.Tests
         }
 
         [Test]
+        public void PlacementTuning_SceneAwareOrientationDefaults()
+        {
+            var t = new PlacementTuning();
+            Assert.AreEqual(OrientationMode.SceneAware, t.orientationMode);
+            Assert.AreEqual(0, (int)OrientationMode.CameraFacing);
+            Assert.AreEqual(1, (int)OrientationMode.Shadow);
+            Assert.AreEqual(2, (int)OrientationMode.SceneAware);
+            Assert.IsTrue(t.wallFlush);
+            Assert.AreEqual(0.01f, t.wallGapM);
+            Assert.AreEqual(0.30f, t.wallMaxStandoffM);
+            Assert.AreEqual(1.5f, t.wallMaxShiftM);
+            Assert.IsTrue(t.wallBackedCenterOnFootprint);
+            Assert.AreEqual(0.75f, t.wallMaxLateralFrac);
+            Assert.AreEqual(300, t.wallMinPoints);
+            Assert.AreEqual(12000, t.wallMaxPoints);
+            Assert.AreEqual(256, t.wallRansacIterations);
+            Assert.AreEqual(0.03f, t.wallTauMinM);
+            Assert.AreEqual(0.01f, t.wallTauPerMeter);
+            Assert.AreEqual(0.35f, t.wallMinInlierFraction);
+            Assert.AreEqual(0.15f, t.wallMaxBehindFraction);
+            Assert.AreEqual(8f, t.wallMaxSplitDeg);
+            Assert.AreEqual(0.15f, t.wallMinGrazingCos);
+            Assert.AreEqual(0.15f, t.wallMountedCenterTolM);
+            Assert.AreEqual(1.0f, t.wallMountedMaxAnchorDistM);
+            Assert.AreEqual(0.5f, t.wallBackedMaxDistSlackM);
+            Assert.IsTrue(t.useCategoryWallHeuristic);
+            Assert.AreEqual("bookshelf,bookcase,shelving unit,cabinet,cupboard,wardrobe,armoire,dresser,chest of drawers,sideboard,credenza," +
+                            "buffet,hutch,tv stand,tv console,media console,console table,entertainment center,desk,headboard,bed,piano," +
+                            "fireplace,radiator,refrigerator,fridge", t.wallBackedCategories);
+            Assert.IsTrue(t.orientationGizmos);
+
+            var c = t.Clone();
+            c.orientationMode = OrientationMode.CameraFacing;
+            c.wallBackedCategories = "x";
+            Assert.AreEqual(OrientationMode.SceneAware, t.orientationMode, "Clone is a copy");
+            Assert.AreEqual(PlacementTuning.DefaultWallBackedCategories, t.wallBackedCategories);
+        }
+
+        [Test]
         public void PlacementTuning_CloneIsIndependent()
         {
             var a = new PlacementTuning();
@@ -68,6 +107,8 @@ namespace SplatPresso.Tests
             Assert.LessOrEqual(s.maxUtteranceSeconds, 85f, "about 93 s of 16 kHz WAV already exceeds the 4 MB body cap");
             Assert.NotNull(s.placement);
             Assert.AreEqual(270f, s.placement.yawOffsetDeg);
+            Assert.IsTrue(s.askVlmForOrientation);
+            Assert.AreEqual(OrientationMode.SceneAware, s.placement.orientationMode);
         }
 
         [Test]

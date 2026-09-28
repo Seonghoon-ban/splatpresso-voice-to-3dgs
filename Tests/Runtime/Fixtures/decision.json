@@ -15,7 +15,8 @@
         0.4
       ],
       "size_hint_m": 0.9,
-      "resting_surface": "ground"
+      "resting_surface": "ground",
+      "against_wall": "no"
     }
   ],
   "edit_prompt": "Add a red wooden chair with a tall solid backrest standing on the floor in the middle of the room, left of the wooden table. Keep everything else exactly the same: same camera angle, same framing, same lighting, same photographic style. Do not modify or remove any existing content."

@@ -92,7 +92,9 @@ namespace SplatPresso.Extras
             m_CumMove += move;
             m_CumScale *= scaleMul;
             m_CumYaw += yaw;
-            Debug.Log($"[SplatPresso] Nudge cumulative: move={m_CumMove:F3} yaw={m_CumYaw:F1}deg scale x{m_CumScale:F3} " +
+            var gen = go.GetComponent<GeneratedObject>();
+            string rule = gen != null && gen.source?.placement != null ? gen.source.placement.rule : "-";
+            Debug.Log($"[SplatPresso] Nudge cumulative: move={m_CumMove:F3} yaw={m_CumYaw:F1}deg scale x{m_CumScale:F3} rule={rule} " +
                       "(bake yaw into placement.yawOffsetDeg and scale into placement.uniformScaleFactor)");
 
             if (move != Vector3.zero) RaiseNudged(go, "move");

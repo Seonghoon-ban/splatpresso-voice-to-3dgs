@@ -3,6 +3,42 @@
 All notable changes to this package are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-29
+
+벽을 아는 물체 방향: 벽에 거는 물체와 벽에 붙는 가구는 벽과 평행하게, 벽에 붙여 놓입니다.
+
+### Added
+- **`placement.orientationMode` (기본 `SceneAware`)**: 벽에 거는 물체(그림·시계·박제·벽선반 등)와 벽에 붙는 가구(책장·수납장·
+  TV장·옷장 등)는 캡처 depth에서 물체 뒤의 벽 평면을 찾아(수직 평면 RANSAC + 품질 게이트) 벽 법선 방향을 보게 돌리고,
+  뒷면을 벽에서 `wallGapM`(1 cm) 띄워 붙입니다. 벽에 거는 물체는 물체 중심을 지나는 시선이 벽과 만나는 곳에 걸리고(뒤로 최대
+  `wallMaxStandoffM` 0.30 m), 벽에 붙는 가구는 바닥 실루엣의 가운데로 옮겨집니다. 벽 판정에는 VLM 힌트와 depth 기하가 둘 다
+  맞아야 하며, 하나라도 실패하면(창문·거울·문, 가구에 가려진 벽, 너무 비스듬한 시야, 평평한 물체, depth 없음 등) 예전처럼
+  카메라를 봅니다. 결과는 카메라 방향에서 81° 이상 벗어나지 않으므로 사용자에게 등을 돌리지 않습니다. 크기는 바뀌지 않습니다.
+- `Shadow` 모드: 벽 규칙을 계산해 로그로만 남기고 예전 자세를 적용합니다. `CameraFacing`은 이전 동작과 비트 단위로 같습니다
+  (설정만 바꾸면 즉시 롤백).
+- **`askVlmForOrientation` (기본 켬)**: DECIDE가 `against_wall`(yes/no)을, VERIFY가 물체마다 `support`, `back_against_wall`,
+  `front_faces`를 돌려줍니다(추가 호출 없음). 끄면 이전 프롬프트·스키마를 바이트 단위로 그대로 씁니다. 힌트가 없는 이전 세션은
+  `resting_surface: wall`과 이름 목록(`wallBackedCategories`)으로 판단합니다.
+- 배치된 자세와 판단 근거(`PlacementRecord`: 규칙, 의도, 카메라/벽 yaw, 이동량, 벽 적합 통계)를 `result.json`의 각 물체
+  `placement`에 저장합니다. 로그: `Placed '<이름>' at … yaw …`, `Orient '<이름>' rule=… cand=… intent=…`,
+  `Verify orientation: …`. 선택한 물체의 기즈모로 벽(청록)·카메라 방향(빨강)·적용 방향(초록)·VLM 방향(노랑)·이동(자홍)을
+  보여 줍니다(`orientationGizmos`). 미리보기 상자도 같은 방향으로 돌고 뒷면이 벽에 붙습니다.
+- `SplatPresso > Diagnostics > Orientation Replay…`: 저장된 세션을 API 호출 없이 다시 풀어 카메라 방향/벽 규칙을 CSV로
+  비교합니다(`-executeMethod SplatPresso.EditorTools.OrientationReplay.RunBatch -replayRoots "a;b"`로 배치 실행 가능).
+
+### Notes
+- 저장된 세션의 물체 131개 재생: 벽 의도가 있는 16개 중 13개가 벽에 맞춰졌고(테스트 룸 90.0°/90.1°/180.0°/책장 90.0°,
+  DiC 거실 7개 95.5–95.9°, 두 번째 방 2개 60.7°/−119.2°), 나머지 3개(장식 칼·랜턴·소파 등받이에 기댄 그림)와 벽 의도가 없는
+  115개는 이전과 비트 단위로 같았습니다. 벽 판단 계산은 p95 22 ms.
+- ENHANCE가 물체를 정면 뷰로 다시 그리므로 편집 이미지의 비스듬한 각도는 보존되지 않고, 벽 물체는 벽 방향으로 맞춰집니다.
+  의자·화분·램프처럼 벽과 무관한 물체는 계속 카메라를 봅니다.
+- 라이브 확인(데모 룸, "왼쪽 벽에 액자를 하나 걸고, 오른쪽 벽에 붙여서 책장도 하나 놔줘"): 액자 139.2° → 90.0°(왼쪽 벽),
+  책장 −138.2° → −90.1°(오른쪽 벽), 둘 다 VERIFY 힌트(`wall_mounted`, `back_against_wall=yes`)와 depth 벽 적합이 일치.
+- TripoSplat이 평평한 벽 장식에도 두꺼운 뒷면을 지어내는 경우가 많습니다(라이브: 액자 깊이 0.77 = 폭 0.77). 그런 물체는 벽에서
+  최대 0.30 m만 띄우고 나머지는 벽 속에 들어갑니다(메시 벽은 가려 줌, 3DGS 벽은 못 가림). 정면 축으로 눌러 평평하게 만드는 방법도
+  시험했지만 그림이 번져 보여 넣지 않았습니다.
+- 바닥이 기울어진 씬은 지원하지 않습니다.
+
 ## [0.3.0] - 2026-09-28
 
 음성 대화를 원본 연구 프로젝트처럼 빠르게: OpenAI 키가 있으면 OpenAI Realtime이 기본입니다.
