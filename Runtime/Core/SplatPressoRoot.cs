@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
+using SplatPresso.Api;
 using SplatPresso.Placement;
 using SplatPresso.Voice;
 using UnityEngine;
@@ -145,6 +146,7 @@ namespace SplatPresso
         {
             if (!TryBeginRun(request, sourceUtterance, out var orch, out var session))
                 return null;
+            WarmUpModel("run");
             RunDetached(orch, request, session, StartStage.Capture, destroyCancellationToken);
             return session.RunId;
         }
@@ -157,6 +159,7 @@ namespace SplatPresso
         {
             if (!TryBeginRun(request, sourceUtterance, out var orch, out var session))
                 return null;
+            WarmUpModel("run");
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, destroyCancellationToken))
                 return await RunOnAsync(orch, request, session, StartStage.Capture, linked.Token);
         }
@@ -228,6 +231,7 @@ namespace SplatPresso
         /// </summary>
         public void SubmitText(string userText)
         {
+            WarmUpModel("typed");
             if (string.IsNullOrWhiteSpace(userText))
                 return;
             if (voiceAgent == null && Application.isPlaying)
@@ -275,11 +279,13 @@ namespace SplatPresso
             SyncVoiceSubscription();
             if (startVoiceOnStart && voiceAgent != null)
                 voiceAgent.StartBackend();
+            WarmUpModel("start");
         }
 
         void Update()
         {
             SyncVoiceSubscription(); // the voice agent may be assigned or replaced at runtime
+            ModelWarmer.Tick(Settings, Mode);
             if (!enableModeHotkeys || VoiceHud.TextInputFocused)
                 return;
             if (InputCompat.GetKeyDown(ModeToggleKey))
@@ -297,6 +303,17 @@ namespace SplatPresso
 
         /// <summary>The settings in use: the assigned asset, else <see cref="SplatPressoSettings.Active"/>.</summary>
         public SplatPressoSettings Settings => settings != null ? settings : SplatPressoSettings.Active;
+
+        /// <summary>
+        /// Records user activity and warms the 3D model the next run would use (free, debounced; see
+        /// <see cref="ModelWarmer"/>). Called on start, when a run starts and when text is submitted; the voice agent and
+        /// HUD call <see cref="ModelWarmer"/> directly when talking or typing starts.
+        /// </summary>
+        public void WarmUpModel(string reason)
+        {
+            ModelWarmer.NoteActivity();
+            ModelWarmer.WarmUp(Settings, ModelWarmer.RouteFor(Settings, Mode), reason);
+        }
 
         // Fills missing references (GetComponent, then the scene). Runs in Awake and again before every run, so
         // components that are added or assigned later (e.g. by scripts or tests) are picked up.

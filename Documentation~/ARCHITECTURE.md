@@ -75,7 +75,9 @@ Setup puts these on one `SplatPresso` GameObject (references are auto-resolved i
 |---|---|
 | `SplatPressoRoot` | Public entry point. Owns runs (one `PlacementOrchestrator` + one session per run), capacity guard, request gate, mode/representation, M/N hotkeys, narration of milestones to the voice agent, aggregated events with `runId` |
 | `VoiceAgent` | Facade over `IVoiceBackend` (`GenpressoVoiceBackend` default, `OpenAIRealtimeBackend` optional), push-to-talk edge detection, mic, snapshot, text submit |
-| `MicCapture` / `AudioStreamPlayer` | Warm microphone with 0.35 s pre-roll and a capped utterance buffer (16 kHz chat / 24 kHz realtime); streamed PCM playback for the realtime backend |
+| `MicCapture` / `AudioStreamPlayer` | Warm microphone with 0.35 s pre-roll and a capped utterance buffer (16 kHz chat / 24 kHz realtime); streamed 24 kHz PCM playback (Realtime audio and spoken GenPresso replies) |
+| `ReplySpeaker` (plain class, owned by `VoiceAgent`) | Speaks GenPresso chat replies: `textToSpeech` media route (MiniMax speech-02-turbo, 24 kHz PCM; other routes decoded as WAV/MP3), ungated and fast-polled, in order, cancelled by push-to-talk |
+| `ModelWarmer` (static) | Free warm-up requests (inputs that fail validation) that boot the 3D model's worker on talk / typing / run start, and keep it warm while the user is active |
 | `VoiceHud` | IMGUI HUD: state pill, mode chips, reply bubble, text box (`TextInputFocused`), mic picker (`DevicePanelOpen`), run list, key banner |
 | `CaptureService` | `ICaptureProvider`. Requests a one-shot capture from `SplatCaptureFeature`, fails fast when the feature is not active, times out with an actionable message, encodes JPEG; also serves voice snapshots (never throws, returns null when busy) |
 | `ObjectSpawnService` | `IObjectPlacer`. Loads `.ply` → runtime `GaussianSplatAsset`, solves placement, spawns `Splat_<label>` (root + `Content` child), or spawns meshes through `MeshSpawnerRegistry`; spawn cap; `GeneratedObject` per root |
@@ -88,10 +90,11 @@ loaded through `SplatPressoSettings.Active`; the package folder is read-only whe
 ## 4. Data flow
 
 ```
-VoiceAgent ── PTT release ──► GenpressoVoiceBackend
+VoiceAgent ── PTT release ──► (silence guard: peak < silenceThreshold → not sent) ──► GenpressoVoiceBackend
    WAV (16 kHz) + snapshot JPEG + last N turns (audio/image rewritten to text) + pending [PIPELINE] notices
    └► POST {apiBaseUrl}/chat/completions  (json_schema voice_turn; schema-drop retry; one JSON repair; image-drop retry)
         { transcript, reply, actions[] } → create → PlacementRequested(VoicePlacementRequest) → SplatPressoRoot.StartRun
+                                          reply  → AgentReply (subtitle) + ReplySpeaker → media/{textToSpeech} → AudioStreamPlayer
                                           cancel → CancelRequested → SplatPressoRoot.CancelAll
 
 SplatPressoRoot.StartRun ─► gate/capacity/key checks ─► PipelineSession.CreateNew ─► PlacementOrchestrator.RunAsync

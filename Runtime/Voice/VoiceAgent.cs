@@ -1,4 +1,5 @@
 using System;
+using SplatPresso.Api;
 using SplatPresso.Placement;
 using SplatPresso.Rendering;
 using UnityEngine;
@@ -15,6 +16,8 @@ namespace SplatPresso.Voice
     /// Backend selection: GenpressoChat (default, GenPresso key only), OpenAIRealtime (needs an OpenAI key; falls
     /// back to GenpressoChat with a warning when the key is missing or WebSockets are unavailable), None (no
     /// microphone; typed requests still go through a text-only GenPresso chat backend).
+    /// With the GenPresso chat backend, replies are spoken through GenPresso text-to-speech
+    /// (<see cref="SplatPressoSettings.speakReplies"/>, <see cref="ReplySpeaker"/>); Realtime speaks by itself.
     /// </remarks>
     [DisallowMultipleComponent]
     [AddComponentMenu("SplatPresso/Voice Agent")]
@@ -37,12 +40,12 @@ namespace SplatPresso.Voice
         public Camera snapshotCamera;
         [Tooltip("Microphone (added automatically when empty).")]
         public MicCapture mic;
-        [Tooltip("Speech output for the OpenAI Realtime backend (added automatically when that backend starts).")]
+        [Tooltip("Speech output (added automatically when the OpenAI Realtime backend starts or the first reply is spoken).")]
         public AudioStreamPlayer player;
 
         /// <summary>What the user said (or typed).</summary>
         public event Action<string> UserTranscript;
-        /// <summary>What the agent replied (always text; also spoken with the Realtime backend).</summary>
+        /// <summary>What the agent replied (always text; also spoken unless speakReplies is off with the GenPresso backend).</summary>
         public event Action<string> AgentReply;
         /// <summary>The user asked for object(s); carries the utterance that produced the request.</summary>
         public event Action<VoicePlacementRequest> PlacementRequested;
@@ -69,6 +72,7 @@ namespace SplatPresso.Voice
         CaptureService m_CaptureService;
         float m_NextCaptureServiceLookup;
         Func<Awaitable<byte[]>> m_CaptureFunc;
+        ReplySpeaker m_Speaker;
 
         // ------------------------------------------------------------------------------------------
         // state
@@ -91,14 +95,22 @@ namespace SplatPresso.Voice
         public bool IsRecording => mic != null && mic.IsCapturing;
         /// <summary>A turn or narration is in flight ("Thinking...").</summary>
         public bool IsBusy => m_Backend != null && m_Backend.IsBusy;
-        /// <summary>Spoken audio is playing (Realtime backend).</summary>
+        /// <summary>Spoken audio is playing.</summary>
         public bool IsSpeaking => player != null && player.isActiveAndEnabled && player.IsPlaying;
+        /// <summary>A reply is being turned into speech (GenPresso text-to-speech) and will play shortly.</summary>
+        public bool IsPreparingSpeech => m_Speaker != null && m_Speaker.IsPending;
         /// <summary>Realtime with semantic VAD: no push-to-talk, the microphone streams continuously.</summary>
         public bool IsHandsFree => ActiveBackend == VoiceBackendKind.OpenAIRealtime && Settings.useSemanticVad;
         /// <summary>Push-to-talk is possible (a voice backend and microphone support exist).</summary>
         public bool CanTalk => ActiveBackend != VoiceBackendKind.None && mic != null && MicCapture.IsSupported;
         /// <summary>Recent microphone peak level 0..1 (for meters).</summary>
         public float MicLevel => mic != null ? mic.CurrentLevel : 0f;
+        /// <summary>
+        /// Push-to-talk has been held for over a second and the microphone delivered only silence (muted device, zero
+        /// input volume, or the wrong microphone). Such a turn is not sent (see <see cref="SplatPressoSettings.silenceThreshold"/>).
+        /// </summary>
+        public bool MicSeemsSilent => m_Talking && mic != null && Time.unscaledTime - m_TalkStart > 1f &&
+                                      IsSilentUtterance(mic.CapturePeak, Settings.silenceThreshold);
         /// <summary>Label of the microphone in use.</summary>
         public string ActiveMicDevice => mic != null ? mic.ActiveDevice : "(off)";
         /// <summary>Available microphone device names.</summary>
@@ -291,9 +303,10 @@ namespace SplatPresso.Voice
             m_Backend?.NotifyPipeline(message, narrate);
         }
 
-        /// <summary>Stops speech output now (Realtime: cancels the active response).</summary>
+        /// <summary>Stops speech output now (Realtime: cancels the active response; GenPresso: drops pending replies).</summary>
         public void StopSpeaking()
         {
+            m_Speaker?.Stop();
             m_Backend?.StopSpeaking();
             if (player != null)
                 player.Flush();
@@ -402,6 +415,10 @@ namespace SplatPresso.Voice
                 return;
             }
 
+            // Talking is the earliest sign that a generation may follow: boot the 3D model's worker now (free).
+            ModelWarmer.NoteActivity();
+            ModelWarmer.WarmUp(Settings, ModelWarmer.RouteFor(Settings, Settings != null ? Settings.defaultMode : GenerationMode.SceneContextual), "talk");
+            m_Speaker?.Stop(); // barge-in also silences spoken GenPresso replies (and drops those still being synthesized)
             m_Backend.OnTalkPressed(); // barge-in first (clear, cancel, flush), then capture incl. the warm pre-roll
             if (!mic.StartCapture())
             {
@@ -424,6 +441,14 @@ namespace SplatPresso.Voice
             if (utt != null && held < Settings.minUtteranceSeconds)
             {
                 Debug.Log($"[SplatPresso] Push-to-talk held {held:F2}s (< minUtteranceSeconds); ignored");
+                utt = null;
+            }
+            else if (utt != null && IsSilentUtterance(utt.peak, Settings.silenceThreshold))
+            {
+                // Silence would still reach the model, which then tends to invent a request ("add a coffee table").
+                ReportError($"The microphone recorded only silence (peak {utt.peak:F3}) on '{ActiveMicDevice}'. " +
+                            "Check that it is not muted and that its input volume is up (Windows: Settings > System > Sound > Input), " +
+                            "or pick another microphone.");
                 utt = null;
             }
             try { m_Backend?.OnTalkReleased(utt, m_CaptureFunc); }
@@ -483,6 +508,8 @@ namespace SplatPresso.Voice
                     mic.CancelCapture();
             }
             m_ApiTalkHeld = false;
+            m_Speaker?.Dispose();
+            m_Speaker = null;
             var backend = m_Backend;
             m_Backend = null;
             ActiveBackend = VoiceBackendKind.None;
@@ -601,8 +628,30 @@ namespace SplatPresso.Voice
         {
             LastAgentReply = reply;
             LastAgentReplyTime = Time.unscaledTime;
+            SpeakReply(reply);
             Raise(AgentReply, reply);
         }
+
+        // The GenPresso chat backend answers in text only: speak it through GenPresso text-to-speech.
+        void SpeakReply(string reply)
+        {
+            var s = Settings;
+            if (!s.speakReplies || string.IsNullOrWhiteSpace(reply) || m_Backend == null ||
+                ActiveBackend == VoiceBackendKind.OpenAIRealtime || !Application.isPlaying)
+                return;
+            if (player == null)
+            {
+                player = GetComponent<AudioStreamPlayer>();
+                if (player == null)
+                    player = gameObject.AddComponent<AudioStreamPlayer>(); // RequireComponent adds the AudioSource
+            }
+            if (m_Speaker == null)
+                m_Speaker = new ReplySpeaker(() => Settings, player);
+            m_Speaker.Speak(reply);
+        }
+
+        /// <summary>True when a push-to-talk peak level counts as silence for <paramref name="threshold"/> (0 = never).</summary>
+        public static bool IsSilentUtterance(float peak, float threshold) => threshold > 0f && peak < threshold;
 
         void HandlePlacementRequested(VoicePlacementRequest request)
         {

@@ -96,6 +96,9 @@ namespace SplatPresso.Voice
         /// <summary>Peak level of recent input in 0..1 (after gain), for UI meters.</summary>
         public float CurrentLevel { get; private set; }
 
+        /// <summary>Loudest sample (after gain) of the capture in progress, or of the last one.</summary>
+        public float CapturePeak => m_UtterancePeak;
+
         /// <summary>True while the warm microphone is running.</summary>
         public bool IsMicRunning => m_Clip != null;
 

@@ -103,6 +103,15 @@ namespace SplatPresso.Api
         public SplatPressoSettings Settings => m_Settings;
 
         /// <summary>
+        /// Take a slot of the global media concurrency gate (default). Short interactive jobs (spoken replies) skip
+        /// it so they never wait behind minutes-long 3D jobs.
+        /// </summary>
+        public bool UseConcurrencyGate { get; set; } = true;
+
+        /// <summary>Status poll interval during a job's first 10 seconds (every 2 s after that).</summary>
+        public float FirstPollIntervalSec { get; set; } = 1f;
+
+        /// <summary>
         /// Runs one media job for <paramref name="route"/>. <paramref name="buildInput"/> builds the request body for
         /// each target it is about to be submitted to. Throws <see cref="GenpressoException"/>,
         /// <see cref="CostCapExceededException"/>, <see cref="TimeoutException"/> or <see cref="OperationCanceledException"/>.
@@ -122,7 +131,9 @@ namespace SplatPresso.Api
                 throw new CostCapExceededException(
                     $"Cost cap would be exceeded by '{costLabel}' (~{route.estimatedCost:F2} credits; spent {m_Ledger.TotalCost:F2} of {m_Ledger.capCost:F2})");
 
-            await AcquireSlotAsync(ct);
+            bool gated = UseConcurrencyGate;
+            if (gated)
+                await AcquireSlotAsync(ct);
             try
             {
                 if (m_Settings.mediaProvider == MediaProvider.FalDirect)
@@ -131,7 +142,8 @@ namespace SplatPresso.Api
             }
             finally
             {
-                ReleaseSlot();
+                if (gated)
+                    ReleaseSlot();
             }
         }
 
@@ -412,7 +424,7 @@ namespace SplatPresso.Api
             double budget = Mathf.Max(10, timeoutSec);
             try
             {
-                // ---- poll: every 1 s for the first 10 s, then every 2 s ----
+                // ---- poll: every FirstPollIntervalSec (1 s) for the first 10 s, then every 2 s ----
                 // The budget is checked only AFTER a status read that did not say COMPLETED (or when no status could
                 // be read), never before one: a job that completed at the edge of the budget, or during a stall
                 // (editor pause, long hitch, runInBackground off), is fetched instead of being thrown away. So a
@@ -421,7 +433,7 @@ namespace SplatPresso.Api
                 string lastReported = null;
                 while (true)
                 {
-                    await HttpJson.DelayAsync(sw.Elapsed.TotalSeconds < 10.0 ? 1f : 2f, ct);
+                    await HttpJson.DelayAsync(sw.Elapsed.TotalSeconds < 10.0 ? Mathf.Clamp(FirstPollIntervalSec, 0.1f, 2f) : 2f, ct);
 
                     var resp = await HttpJson.SendAsync("GET", urls.statusUrl, null, null, headers, kPollTimeoutSec, ct, throwOnHttpError: false);
                     long code = resp.StatusCode;

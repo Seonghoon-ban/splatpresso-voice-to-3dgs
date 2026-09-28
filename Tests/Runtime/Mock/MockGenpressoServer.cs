@@ -28,8 +28,10 @@ namespace SplatPresso.Tests
         /// the file name of a download.
         /// </summary>
         public string target;
-        /// <summary>Capability the submit was classified as (edit, enhance, t2i, segment, rembg, depth, splat, mesh-image, mesh-text).</summary>
+        /// <summary>Capability the submit was classified as (edit, enhance, t2i, segment, rembg, depth, splat, mesh-image, mesh-text, tts).</summary>
         public string capability;
+        /// <summary>JSON body of a submit (null for other requests).</summary>
+        public string submitBody;
         /// <summary>
         /// Job id: the job an accepted submit created (null when the submit was rejected, i.e. nothing was queued), or
         /// the job a status/result/cancel request addressed. Correlates a submit with its status polls and result fetches.
@@ -490,6 +492,7 @@ namespace SplatPresso.Tests
         static string Classify(string modelPath, JObject input)
         {
             string p = modelPath.ToLowerInvariant();
+            if (p.Contains("speech") || p.Contains("/tts")) return "tts";
             if (p.Contains("triposplat")) return "splat";
             if (p.Contains("rodin")) return p.Contains("text-to-3d") ? "mesh-text" : "mesh-image";
             if (p.Contains("sam-3")) return "segment";
@@ -521,6 +524,7 @@ namespace SplatPresso.Tests
             string capability = Classify(modelPath, input ?? new JObject());
             // Tag the record before rejecting anything so tests can see the fall-through per capability.
             rec.capability = capability;
+            rec.submitBody = input?.ToString(Formatting.None);
 
             // Submit only knows applications: an unknown one is rejected here (404, nothing queued or billed).
             string owner = Segments(modelPath)[0].ToLowerInvariant();
@@ -653,6 +657,9 @@ namespace SplatPresso.Tests
                 case "mesh-image":
                     if (!HasList("image_urls") && !HasList("input_image_urls")) return Missing("image_urls");
                     break;
+                case "tts":
+                    if (!Has("text")) return Missing("text");
+                    break;
             }
             if (input.ToString(Formatting.None).Contains("__probe__"))
                 return Detail("literal_error", "Input should be 'png', 'jpeg' or 'ply'", "output_format");
@@ -681,6 +688,12 @@ namespace SplatPresso.Tests
                     return new JObject { ["image"] = new JObject { ["url"] = Url("cutout.png"), ["content_type"] = "image/png" } };
                 case "depth":
                     return new JObject { ["image"] = new JObject { ["url"] = Url("depth.png"), ["content_type"] = "image/png" } };
+                case "tts": // live MiniMax speech-02-turbo shape (asked for pcm / url)
+                    return new JObject
+                    {
+                        ["audio"] = new JObject { ["url"] = Url("speech.pcm"), ["content_type"] = "audio/x-pcm", ["file_name"] = "speech.pcm", ["file_size"] = SpeechPcm.Length },
+                        ["duration_ms"] = 500,
+                    };
                 case "splat":
                     return new JObject
                     {
@@ -781,6 +794,8 @@ namespace SplatPresso.Tests
             rec.target = name;
             if (name.Contains("..") || name.Contains("/") || name.Contains("\\"))
                 return Html404();
+            if (name == "speech.pcm")
+                return new Reply { status = 200, contentType = "audio/x-pcm", body = SpeechPcm };
             string path = Path.Combine(m_FixturesDir, name);
             if (!File.Exists(path))
                 return Html404();
@@ -791,6 +806,22 @@ namespace SplatPresso.Tests
         }
 
         string ReadFixtureText(string name) => File.ReadAllText(Path.Combine(m_FixturesDir, name));
+
+        /// <summary>The mock's spoken reply: 0.5 s of a 440 Hz tone, 24 kHz mono PCM16 little-endian.</summary>
+        public static readonly byte[] SpeechPcm = BuildSpeechPcm();
+
+        static byte[] BuildSpeechPcm()
+        {
+            const int rate = 24000, n = rate / 2;
+            var bytes = new byte[n * 2];
+            for (int i = 0; i < n; i++)
+            {
+                short v = (short)(Math.Sin(2 * Math.PI * 440 * i / rate) * 8000);
+                bytes[i * 2] = (byte)(v & 0xff);
+                bytes[i * 2 + 1] = (byte)((v >> 8) & 0xff);
+            }
+            return bytes;
+        }
 
         // ------------------------------------------------------------------------------------------
         // Bodies

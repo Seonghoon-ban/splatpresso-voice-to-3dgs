@@ -447,6 +447,8 @@ namespace SplatPresso.Voice
 
         void OpenTextInput()
         {
+            if (root != null)
+                root.WarmUpModel("typing");
             m_TextOpen = true;
             m_Text = "";
             m_FocusRequests = 3;
@@ -562,7 +564,10 @@ namespace SplatPresso.Voice
                 float pulse = 0.6f + 0.4f * Mathf.Sin(Time.unscaledTime * 7f);
                 Fill(new Rect(x + 14f, y + 9f, 12f, 12f), new Color(1f, 0.2f, 0.2f, pulse));
                 GUI.Label(titleRect, $"Listening...  {voiceAgent.RecordingSeconds:0.0}s", m_TitleStyle);
-                DrawLevelBar(new Rect(x + 30f, y + ph - 14f, pw - 60f, 7f), voiceAgent.MicLevel);
+                if (voiceAgent.MicSeemsSilent)
+                    GUI.Label(subRect, "No sound from the mic - check mute / input volume" + (micHint != null ? "  " + micHint : ""), m_SmallStyle);
+                else
+                    DrawLevelBar(new Rect(x + 30f, y + ph - 14f, pw - 60f, 7f), voiceAgent.MicLevel);
                 return y;
             }
 

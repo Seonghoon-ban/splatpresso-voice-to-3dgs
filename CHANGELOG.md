@@ -3,6 +3,27 @@
 All notable changes to this package are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-28
+
+실사용 테스트 피드백(대기 시간, 한국어 인식, 음성 답변)을 반영했습니다.
+
+### Added
+- **답변 음성 (GenPresso TTS)**: GenpressoChat 백엔드의 답변을 GenPresso 음성 합성으로 읽어 줍니다(`speakReplies`, 기본 켜짐).
+  새 미디어 경로 `textToSpeech` = `gp/minimax/speech-02-turbo`(24 kHz PCM 요청) → 대체 `gp/elevenlabs/tts/multilingual-v2`(MP3).
+  목소리 `ttsVoice`, 속도 `ttsSpeed`. 실측 5~10초, 한국어 발음 확인(합성 음성을 다시 받아쓰기해 원문과 일치). Space로 즉시 중단.
+  OpenAI 키는 계속 선택 사항입니다(Realtime 백엔드).
+- **무음 가드**: push-to-talk 녹음의 최대 레벨이 `silenceThreshold`(기본 0.01) 미만이면 모델에 보내지 않고 원인과 확인 방법을 표시합니다.
+  무음을 받은 모델이 요청을 지어내던 문제("한국어로 말했는데 엉뚱하게 알아들음"의 원인: OS에서 마이크가 무음)를 막습니다.
+  녹음 중 1초 이상 무음이면 HUD에 `No sound from the mic`.
+- **3D 모델 워밍업** (`warmUpModels`, `warmUpIntervalSec` 180초, `keepWarmMinutes` 15분): 말하기·입력·생성 시작 시 과금되지 않는
+  (검증 실패) 요청으로 TripoSplat/Rodin 워커를 미리 깨우고, 활동 중에는 식지 않게 유지합니다. 실측으로 TripoSplat은 4분 쉬면 그대로,
+  8분 쉬면 콜드 스타트(5.5분 대기)였습니다.
+- `MediaJobClient.UseConcurrencyGate`, `FirstPollIntervalSec`; `AudioStreamPlayer.EnqueueSamples`; `MicCapture.CapturePeak`;
+  `VoiceAgent.MicSeemsSilent`, `IsPreparingSpeech`, `IsSilentUtterance`.
+
+### Fixed
+- GenPresso의 `model_not_found` 오류 코드도 "경로 없음"으로 인식해 다음 후보로 넘어갑니다.
+
 ## [0.1.1] - 2026-09-28
 
 실제 GenPresso API로 전 과정을 검증하면서 발견한 문제를 고쳤습니다.

@@ -93,6 +93,8 @@ namespace SplatPresso
         public ModelRoute imageToSplat = DefaultRoute(MediaRouteKeys.ImageToSplat);
         public ModelRoute imageToMesh = DefaultRoute(MediaRouteKeys.ImageToMesh);
         public ModelRoute textToMesh = DefaultRoute(MediaRouteKeys.TextToMesh);
+        [Tooltip("Spoken replies (Voice > speakReplies). MiniMax paths get a PCM request; other paths get {\"text\"} and may return MP3/WAV.")]
+        public ModelRoute textToSpeech = DefaultRoute(MediaRouteKeys.TextToSpeech);
 
         [Header("Generation")]
         [Tooltip("SceneContextual edits your view so objects match the scene; DirectTextTo3D generates objects from text only.")]
@@ -149,6 +151,9 @@ namespace SplatPresso
         [Range(5f, 85f)] public float maxUtteranceSeconds = 60f;
         [Tooltip("Utterances shorter than this are discarded.")]
         public float minUtteranceSeconds = 0.4f;
+        [Tooltip("A push-to-talk turn whose loudest sample stays below this level is not sent: the model would hear silence " +
+                 "(a muted or wrong microphone) and may invent a request. 0 = always send.")]
+        [Range(0f, 0.2f)] public float silenceThreshold = 0.01f;
         [Tooltip("Previous turns sent as context with each voice turn.")]
         [Range(0, 20)] public int voiceHistoryTurns = 6;
         public NarrationMode narrationMode = NarrationMode.Llm;
@@ -160,6 +165,13 @@ namespace SplatPresso
         public string realtimeVoice = "cedar";
         [Tooltip("false = push-to-talk (recommended with speakers), true = semantic VAD (headphones).")]
         public bool useSemanticVad = false;
+        [Tooltip("Speak the agent's replies with GenPresso text-to-speech (the textToSpeech media route: MiniMax speech-02-turbo, " +
+                 "~5-10 s per reply, GenPresso key only). The OpenAI Realtime backend speaks by itself and ignores this.")]
+        public bool speakReplies = true;
+        [Tooltip("MiniMax voice id of spoken replies, e.g. Friendly_Person, Calm_Woman, Wise_Woman, Casual_Guy, Deep_Voice_Man, Lively_Girl.")]
+        public string ttsVoice = "Friendly_Person";
+        [Tooltip("Speaking rate of spoken replies.")]
+        [Range(0.5f, 2f)] public float ttsSpeed = 1f;
 
         [Header("Placement (calibrated for TripoSplat)")]
         public PlacementTuning placement = new PlacementTuning();
@@ -167,6 +179,18 @@ namespace SplatPresso
         [Header("Sessions")]
         [Tooltip("Where run artifacts are stored. Empty = <persistentDataPath>/SplatPresso/sessions; relative paths resolve against persistentDataPath.")]
         public string sessionsFolder = "";
+
+        [Header("Latency")]
+        [Tooltip("Hide the 3D model's cold start: send a free warm-up request (an input that fails validation - not billed) " +
+                 "when you start talking or typing and when a run starts, so the model's worker boots while the image stages " +
+                 "run. Measured on GenPresso: TripoSplat takes ~15 s warm, but 1-6.5 minutes once its worker idled out " +
+                 "(still up after 4 idle minutes, gone after 8).")]
+        public bool warmUpModels = true;
+        [Tooltip("Minimum seconds between warm-up requests per model; while keeping warm, one is sent this often " +
+                 "(keep it under ~4 minutes: the worker idled out between 4 and 8 minutes).")]
+        [Range(30f, 1800f)] public float warmUpIntervalSec = 180f;
+        [Tooltip("After the last talk / typing / run, keep the 3D model warm for this many minutes (0 = only warm on those triggers).")]
+        [Range(0f, 120f)] public float keepWarmMinutes = 15f;
 
         [Header("Runtime")]
         [Tooltip("Keep the player loop running while the window is unfocused (otherwise polling stalls).")]
@@ -203,6 +227,7 @@ namespace SplatPresso
                 case MediaRouteKeys.ImageToSplat: return imageToSplat;
                 case MediaRouteKeys.ImageToMesh: return imageToMesh;
                 case MediaRouteKeys.TextToMesh: return textToMesh;
+                case MediaRouteKeys.TextToSpeech: return textToSpeech;
                 default: return null;
             }
         }
@@ -244,6 +269,8 @@ namespace SplatPresso
                     return new ModelRoute(new[] { "gp/hyper3d/rodin/v2.5/fast", "gp/hyper3d/rodin/v2.5" }, "fal-ai/hyper3d/rodin/v2.5/fast", 3.0f, 600);
                 case MediaRouteKeys.TextToMesh:
                     return new ModelRoute(new[] { "gp/hyper3d/rodin/v2.5/text-to-3d/fast" }, "fal-ai/hyper3d/rodin/v2.5/text-to-3d/fast", 3.0f, 600);
+                case MediaRouteKeys.TextToSpeech:
+                    return new ModelRoute(new[] { "gp/minimax/speech-02-turbo", "gp/elevenlabs/tts/multilingual-v2" }, "fal-ai/minimax/speech-02-turbo", 0.05f, 60);
                 default:
                     return null;
             }
@@ -262,6 +289,7 @@ namespace SplatPresso
             imageToSplat ??= DefaultRoute(MediaRouteKeys.ImageToSplat);
             imageToMesh ??= DefaultRoute(MediaRouteKeys.ImageToMesh);
             textToMesh ??= DefaultRoute(MediaRouteKeys.TextToMesh);
+            textToSpeech ??= DefaultRoute(MediaRouteKeys.TextToSpeech);
             placement ??= new PlacementTuning();
             maxImageLongSide = Mathf.Max(0, maxImageLongSide);
             chatTimeoutSec = Mathf.Max(5, chatTimeoutSec);

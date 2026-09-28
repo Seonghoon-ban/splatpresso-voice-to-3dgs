@@ -83,11 +83,14 @@ namespace SplatPresso
         public const string ImageToSplat = "imageToSplat";
         public const string ImageToMesh = "imageToMesh";
         public const string TextToMesh = "textToMesh";
+        /// <summary>Spoken replies of the GenPresso chat voice agent (not a pipeline step).</summary>
+        public const string TextToSpeech = "textToSpeech";
 
-        /// <summary>Every key, in pipeline order.</summary>
+        /// <summary>Every key, in pipeline order (text-to-speech last).</summary>
         public static readonly string[] All =
         {
             Edit, EditFallback, Enhance, TextToImage, Segment, RemoveBackground, Depth, ImageToSplat, ImageToMesh, TextToMesh,
+            TextToSpeech,
         };
     }
 }

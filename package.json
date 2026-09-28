@@ -1,6 +1,6 @@
 {
   "name": "com.splatpresso.voice-to-3dgs",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "displayName": "SplatPresso Voice To 3DGS",
   "description": "Talk to an agent and it adds generated 3D Gaussian Splat objects that fit your scene. The agent hears your voice and sees your view, plans what to add and where, edits the view to match the scene, isolates the object, turns it into a gaussian splat with TripoSplat and places it at the right position and scale using the scene depth. Everything runs through a single GenPresso API key. aras-p's UnityGaussianSplatting renderer is installed automatically on first import (Git required, OpenUPM fallback). Requires URP with Render Graph and D3D12, Vulkan or Metal.",
   "unity": "6000.0",

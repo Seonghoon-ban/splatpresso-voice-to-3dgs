@@ -5,7 +5,8 @@
 
 > "소파 옆 바닥에 캠핑 의자 하나 놔줘" → 약 1~2분 뒤, 그 자리에 씬의 조명과 스타일에 맞춘 의자 스플랫이 나타납니다.
 
-- **API 키는 GenPresso 하나만 사용합니다** (음성 이해·판단·이미지 편집·3D 생성 모두 GenPresso 경유).
+- **API 키는 GenPresso 하나만 사용합니다** (음성 이해·판단·이미지 편집·3D 생성·답변 음성 합성 모두 GenPresso 경유).
+  OpenAI 키는 선택 사항입니다 — 넣으면 원본 연구 프로젝트처럼 OpenAI Realtime으로 대화합니다.
 - 렌더링은 aras-p의 [UnityGaussianSplatting](https://github.com/aras-p/UnityGaussianSplatting)을 **수정 없이** 사용하며, 처음 설치할 때 자동으로 함께 설치됩니다.
 - 설치는 **git URL 한 줄**이면 됩니다.
 
@@ -65,8 +66,12 @@
 - 배치는 **캡처 시점의 카메라 포즈**를 기준으로 계산하므로, 생성되는 동안 카메라를 움직여도 결과 위치는 바뀌지 않습니다.
 - 모든 단계의 입력·출력은 세션 폴더에 저장되어 **임의의 단계부터 다시 실행**할 수 있습니다(이미 끝난 단계는 재과금 없음).
 - 소요 시간 (실측, 객체 1개): 이미지 단계(판단·편집·검증·분할·다듬기) 약 45초 + TripoSplat.
-  TripoSplat이 이미 워밍돼 있으면 수십 초(Direct 전체 38초), **콜드 스타트/대기열이면 수 분**(실측 6분 25초)이 걸릴 수 있습니다.
-  그래서 TripoSplat 타임아웃 기본값은 600초입니다.
+  TripoSplat 자체는 약 5초(추론)지만, 워커가 쉬고 있으면 **콜드 스타트로 1~6.5분**을 기다립니다
+  (실측: 4분 쉰 뒤에는 바로 응답, 8분 쉰 뒤에는 5.5분 대기). 워밍된 상태면 제출부터 `.ply` 다운로드까지 약 15초입니다.
+- **워밍업 (`warmUpModels`, 기본 켜짐)**: 말하기 시작(Space 누름)·입력창 열기·생성 시작 시점에, 3D 모델에 **검증에서 실패하는
+  무료 요청**을 하나 보내 워커를 미리 깨웁니다. 이미지 단계가 도는 45초 동안 워커가 준비되므로 콜드 스타트가 대부분 가려집니다.
+  마지막 활동 후 `keepWarmMinutes`(기본 15분) 동안은 `warmUpIntervalSec`(기본 180초)마다 다시 보내 워커가 식지 않게 합니다.
+  이 요청은 과금되지 않으며, 끄려면 `warmUpModels`를 해제하세요. TripoSplat 타임아웃 기본값은 600초입니다.
 
 ## 요구 사항
 
@@ -90,7 +95,7 @@ Unity 에디터에서 `Window > Package Manager` → `+` → **Add package from 
 https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs.git
 ```
 
-버전을 고정하려면 뒤에 `#v0.1.1`처럼 태그를 붙입니다.
+버전을 고정하려면 뒤에 `#v0.2.0`처럼 태그를 붙입니다.
 
 **설치하면 이렇게 진행됩니다.**
 
@@ -297,7 +302,14 @@ M/N 단축키는 `SplatPressoRoot.enableModeHotkeys`로 끌 수 있고, 현재 �
 - Space를 떼면 녹음(16 kHz WAV)과 현재 화면(`voiceFrameMaxLongSide` 768 px JPEG)을 GenPresso `chat/completions`에
   한 번에 보냅니다(`input_audio`). 모델은 정해진 JSON(`transcript`, `reply`, `actions`)으로만 답합니다.
 - `create` 액션 → 생성 시작, `cancel` 액션 → 진행 중인 모든 생성 취소. 응답을 해석하지 못하면 사과 메시지만 보이고 **행동을 추측하지 않습니다**.
-- 답변은 **텍스트**(HUD 자막 말풍선)입니다. 현재 GenPresso API에는 음성 합성(TTS) 엔드포인트가 없습니다.
+- 답변은 HUD 자막으로 바로 보이고, **GenPresso 음성 합성(TTS)으로 읽어 줍니다**(`speakReplies`, 기본 켜짐).
+  미디어 경로 `textToSpeech`(기본 `gp/minimax/speech-02-turbo`, 대체 `gp/elevenlabs/tts/multilingual-v2`)를 쓰며,
+  한국어·영어 모두 자동으로 알맞은 발음으로 읽습니다. 목소리는 `ttsVoice`(기본 `Friendly_Person`; `Calm_Woman`, `Wise_Woman`,
+  `Casual_Guy`, `Deep_Voice_Man` 등), 속도는 `ttsSpeed`. 답변 텍스트가 나온 뒤 **소리가 나오기까지 약 5~10초**(실측,
+  대부분 대기열 지연)가 걸립니다. Space를 누르면 말하던 답변을 즉시 멈춥니다(barge-in).
+- 마이크 입력이 **무음**이면(peak < `silenceThreshold`, 기본 0.01) 그 턴은 보내지 않고 경고를 띄웁니다.
+  무음을 받은 모델이 없는 요청을 지어내는 것("소파 앞에 커피 테이블 추가")을 막기 위해서입니다.
+  녹음 중 1초 넘게 소리가 없으면 HUD에 `No sound from the mic`가 표시됩니다.
 - 대화 기록은 최근 `voiceHistoryTurns`(기본 6)턴만 유지하고, 지난 턴의 오디오·이미지는 텍스트로 바꿔 보냅니다.
 - 진행 상황 중 **중요한 순간**(완료, 건너뜀, 불가능 판정)만 에이전트에게 전달되어 자연어로 알려줍니다(`narrationMode`: `Llm` / `Subtitle` / `Off`).
 - 한 번의 발화는 최대 `maxUtteranceSeconds`(기본 60초, 최대 85초). GenPresso 요청 본문 상한 4 MB 때문입니다.
@@ -306,7 +318,9 @@ M/N 단축키는 `SplatPressoRoot.enableModeHotkeys`로 끌 수 있고, 현재 �
 
 **OpenAIRealtime (선택, OpenAI 키 필요)**
 
-- `OPENAI_API_KEY`가 있으면 OpenAI Realtime(`realtimeModel` 기본 `gpt-realtime-2.1`, 목소리 `cedar`)으로 **음성 답변**을 들을 수 있습니다.
+- 원본 연구 프로젝트(DiC)가 쓰던 방식입니다. `voiceBackend = OpenAIRealtime`으로 바꾸고 OpenAI 키를
+  Project Settings > SplatPresso에 저장하거나 `OPENAI_API_KEY`를 설정하면, OpenAI Realtime(`realtimeModel` 기본 `gpt-realtime-2.1`,
+  목소리 `cedar`)과 **실시간 음성 대화**를 합니다(답변 음성이 1초 안팎으로 바로 나옴). 이미지·3D 생성은 계속 GenPresso로 합니다.
   키가 없으면 경고와 함께 GenpressoChat으로 대체됩니다. WebGL에서는 사용할 수 없습니다.
 - `useSemanticVad`는 기본 꺼짐(push-to-talk). 켜면 말을 자동 감지하지만 스피커 에코에 반응할 수 있으니 헤드폰에서만 쓰세요.
 
@@ -378,6 +392,7 @@ GenPresso는 **작업이 끝난 뒤 실제 사용량으로** 크레딧을 차감
 | Scene-aware · Mesh | 약 6–8 | TripoSplat 대신 Rodin 3 |
 | Direct · Mesh | 약 3 | 텍스트→메시 3 |
 | 음성 턴 1회 | 매우 적음 | 텍스트 호출 (잔액 1크레딧 이상 필요) |
+| 답변 음성(TTS) 1회 | 매우 적음 | 짧은 문장 합성 (추정치 0.05, 런 비용 상한에는 포함 안 됨) |
 
 - **런당 상한** `maxCostPerRun` = 25크레딧(추정). 상한에 닿으면 새 미디어 호출을 멈춥니다. 객체 처리 중이면 그 객체만 건너뛰고, 그 외 단계면 런이 실패합니다.
   리플레이는 원장을 새로 시작합니다(파일에는 이력이 누적).
@@ -428,6 +443,8 @@ GenPresso는 **작업이 끝난 뒤 실제 사용량으로** 크레딧을 차감
 | 빌드에서 메시가 분홍색 | glTFast 셰이더가 빌드에 없음 | glTFast 셰이더 그래프를 Always Included Shaders 또는 Shader Variant Collection에 추가 |
 | 설치 시 `No 'git' executable was found` | git 없음 / PATH에 없음 | Git 2.14+ 설치 후 **Unity와 Unity Hub 모두 재시작**, 또는 OpenUPM |
 | 설치 시 `Filename too long` | Windows 경로 길이 | 프로젝트를 짧은 경로로 옮기거나 OpenUPM |
+| 말한 것과 전혀 다른 요청을 알아들음 / `The microphone recorded only silence` / HUD `No sound from the mic` | OS 단계에서 마이크가 무음(음소거·입력 볼륨 0·다른 앱 독점·다른 장치) | 콘솔의 `Utterance captured: … peak 0.00`이 증거입니다. Windows 설정 > 시스템 > 소리 > 입력에서 장치 음소거와 볼륨, 마이크 자체의 음소거 버튼(웹캠·오디오 인터페이스 게인)을 확인하고, V로 소리가 잡히는 장치를 고르세요 |
+| 답변이 음성으로 안 나옴 | `speakReplies` 꺼짐, `textToSpeech` 경로 오류, 또는 소리 출력 장치 | 콘솔의 `Could not speak the reply` 경고 확인 → **Test + Probe Media Models** 로 `textToSpeech` 경로 확인. 답변 텍스트는 항상 자막으로 나옵니다 |
 | 마이크가 반응 없음 | 다른 장치가 선택됨 / OS 권한 | V로 장치 선택(레벨 바 확인). macOS는 Player Settings의 Microphone Usage Description 필요. `debugSaveMicWav`를 켜면 `<persistentDataPath>/SplatPresso/mic_last.wav`로 마지막 녹음 확인 |
 | 창을 가려 둔 빌드가 몇 분 뒤 멈춤 | D3D12 창이 포커스를 잃으면 수백 fps로 돌 수 있음 | `FocusFrameCap` 컴포넌트 추가 또는 `capFrameRateWhenUnfocused` 켜기 |
 
@@ -519,7 +536,9 @@ public class AddChairExample : MonoBehaviour
 - 캡처는 후처리(톤매핑·컬러그레이딩) **이전** 이미지이며, 화면 공간 UI는 포함되지 않습니다. MSAA는 꺼져 있어야 합니다.
 - **Mesh 모드는 실험적**입니다. glTFast가 필요하고, 플레이어 빌드에는 glTFast 셰이더를 포함해야 합니다.
 - GenPresso 모델 경로 일부는 명명 규칙에서 도출한 후보입니다([모델 라우팅](#모델-라우팅과-모델-경로-바꾸기) 참고).
-- GenpressoChat 백엔드의 답변은 텍스트(자막)입니다. 음성으로 듣으려면 OpenAI Realtime 백엔드가 필요합니다.
+- GenpressoChat 백엔드의 음성 답변은 텍스트가 나온 뒤 TTS 작업을 한 번 더 거쳐 5~10초 늦게 나옵니다. 즉각적인 음성 대화가 필요하면
+  OpenAI Realtime 백엔드(OpenAI 키)를 쓰세요. (GenPresso chat의 `openai/gpt-audio` 스트리밍 음성 출력은 현재 GenPresso를
+  거치면 자막 조각만 오고 오디오 데이터가 오지 않아 사용하지 않습니다.)
 - 세션 JSON의 파일 경로는 절대 경로라 세션 폴더를 다른 위치로 옮기면 리플레이가 안 될 수 있습니다.
 - 배치 캘리브레이션(`yawOffsetDeg` 270, `uniformScaleFactor` 0.9)은 TripoSplat 출력 기준입니다. 다른 3D 모델로 바꾸면 다시 맞춰야 합니다.
 
@@ -530,16 +549,18 @@ depth 캡처는 자체 URP 렌더 패스와 셰이더로 하며, 렌더러 내�
 1.1.0 이상인데 이 필드가 없으면(내부 구조가 바뀐 버전·포크) 시작 시와 **Validate Project** 에서 `GaussianSplatting version mismatch` 오류를 냅니다.
 런타임 스플랫 에셋은 렌더러의 공개 API(`GaussianSplatAsset`)로 만듭니다.
 
-## 검증 상태 (0.1.1)
+## 검증 상태 (0.2.0)
 
 | 항목 | 결과 |
 |---|---|
-| 빈 프로젝트에 git URL 한 줄 설치 → 부트스트랩이 렌더러 자동 설치 → 컴파일 | 6000.0.63f1, 6000.2.6f2 모두 통과 (에러·경고 0) |
+| 빈 프로젝트에 git URL 한 줄 설치 → 부트스트랩이 렌더러 자동 설치 → 컴파일 | 6000.0.63f1, 6000.2.6f2 모두 통과 (0.1.1 기준, 에러·경고 0) |
 | EditMode 테스트 (Bbox, 배치 수학, PLY→런타임 에셋, upstream 임포터와 바이트 단위 레이아웃 비교, 키 해석, 에러 파싱 등) | 96/96 통과 |
-| PlayMode 테스트 (실제 GPU 렌더 + RGB/depth 캡처, 실제 GenPresso 동작을 재현한 모의 서버로 Scene-aware·Direct·Mesh 전체 파이프라인, 음성 텍스트 턴) | 20/20 통과 (Input System 전용 프로젝트 포함) |
+| PlayMode 테스트 (실제 GPU 렌더 + RGB/depth 캡처, 실제 GenPresso 동작을 재현한 모의 서버로 Scene-aware·Direct·Mesh 전체 파이프라인, 음성 텍스트 턴, 답변 음성(TTS), 워밍업, 무음 가드) | 27/27 통과 (+1은 이 PC에 실제 키가 저장돼 있어 "키 없음" 상황을 만들 수 없어 자동 건너뜀) |
 | Windows 플레이어 빌드 (Mono, Managed Stripping High) | 런타임 에셋·리플렉션 브리지·캡처·전체 파이프라인(모의 서버) 정상 |
-| 실제 GenPresso API (0.1.1) | **통과** — 플레이어 빌드(Stripping High)에서 한국어 요청 "소파 옆 바닥에 빨간 캠핑 의자 하나 놔줘" → Gemini 음성 턴 → Scene-aware 전체 파이프라인 → TripoSplat 스플랫이 소파 옆 바닥에 배치(약 4.5크레딧 추정), Direct 모드 화분 배치(약 2.8크레딧 추정, 38초). chat의 `json_schema` + 이미지 + `input_audio` 동시 입력, 모든 기본 미디어 경로 존재 확인. |
-| 실제 마이크 음성 턴 / OpenAI Realtime | GenPresso로 오디오+이미지 입력은 확인. 사람이 말하는 마이크 턴과 OpenAI Realtime 실서비스 호출은 미검증 |
+| 실제 GenPresso API — 생성 | **통과** (0.1.1) — 한국어 요청 "소파 옆 바닥에 빨간 캠핑 의자 하나 놔줘" → Scene-aware 전체 파이프라인 → TripoSplat 스플랫이 소파 옆 바닥에 배치(약 4.5크레딧 추정), Direct 모드 화분 배치(약 2.8크레딧 추정, 38초) |
+| 실제 GenPresso API — 음성 (0.2.0, 플레이어 빌드) | **통과** — 실제 마이크 한국어 발화(3.9초) "이 테이블에 놓을만한 물건 하나 추천해서 배치해줘." 정확히 인식 → 화분 생성 요청. 답변 텍스트 4.9초, **답변 음성 재생 시작 13.3초**(TTS 8~9초), 합성된 한국어 음성을 다시 받아쓰기해 원문과 일치 확인 |
+| 실제 GenPresso API — 지연 시간 (0.2.0) | TripoSplat 워밍 상태 약 15초(추론 5초), 워커가 쉬면 1~6.5분 대기. 4분 쉬면 그대로, 8분 쉬면 콜드(5.5분). 과금 없는 워밍업 요청이 워커를 깨우는 것 확인(콜드에서 307초 뒤 응답) |
+| OpenAI Realtime | 실서비스 호출은 미검증 (코드 경로는 원본 연구 프로젝트에서 이식) |
 
 ## 패키지 구조
 
@@ -602,7 +623,11 @@ everything; aras-p's UnityGaussianSplatting renderer is installed automatically 
    or set `GENPRESSO_API_KEY`. Do not put keys in assets. Click *Test Connection*.
 4. **Scene**: *SplatPresso > Create Demo Scene*, or *SplatPresso > Setup Scene…* in your own scene. Restart the editor if Setup
    switched the Windows graphics API to D3D12.
-5. **Play**: hold **Space** and speak ("put a camping chair next to the table"), or press **Enter** to type.
+5. **Play**: hold **Space** and speak ("put a camping chair next to the table"), or press **Enter** to type. Replies are shown as
+   subtitles and spoken through GenPresso text-to-speech (`speakReplies`, MiniMax speech-02-turbo, ~5-10 s after the text).
+   For the original low-latency speech-to-speech agent, set `voiceBackend = OpenAIRealtime` and add an OpenAI key (optional).
+   A turn whose microphone input is silent (muted device) is not sent (`silenceThreshold`).
+   The 3D model's cold start (1-6.5 min after ~5+ idle minutes) is hidden by free warm-up requests (`warmUpModels`).
    **M** toggles Scene-aware / Direct, **N** toggles Splat / Mesh (Mesh needs glTFast, experimental), **V** picks the microphone.
    Optional components: `FirstPersonCamera` (WASD + mouse), `DebugHotkeys` (F5 canned run, F6/F7 replay, F8 cancel, F9 spawn a .ply, Tab overlay),
    `PlacementNudgeController` (arrows / PgUp / PgDn / `[` `]` / `,` `.` to calibrate).

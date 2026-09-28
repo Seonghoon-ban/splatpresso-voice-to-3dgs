@@ -154,6 +154,44 @@ namespace SplatPresso.Voice
             }
         }
 
+        /// <summary>
+        /// Queues mono samples (-1..1) recorded at <paramref name="sampleRate"/>; they are linearly resampled to
+        /// <see cref="SourceRate"/> (used for synthesized replies that do not come as 24 kHz PCM16).
+        /// </summary>
+        public void EnqueueSamples(float[] samples, int sampleRate)
+        {
+            if (samples == null || samples.Length == 0 || sampleRate <= 0)
+                return;
+            double step = (double)sampleRate / SourceRate;
+            int n = sampleRate == SourceRate ? samples.Length : (int)(samples.Length / step);
+            lock (m_Lock)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    float v;
+                    if (sampleRate == SourceRate)
+                    {
+                        v = samples[i];
+                    }
+                    else
+                    {
+                        double pos = i * step;
+                        int i0 = (int)pos;
+                        int i1 = Math.Min(i0 + 1, samples.Length - 1);
+                        v = samples[i0] + (samples[i1] - samples[i0]) * (float)(pos - i0);
+                    }
+                    if (m_Count == m_Ring.Length) // overflow: drop oldest
+                    {
+                        m_ReadPos = (m_ReadPos + 1) % m_Ring.Length;
+                        m_Count--;
+                    }
+                    m_Ring[m_WritePos] = Mathf.Clamp(v, -1f, 1f);
+                    m_WritePos = (m_WritePos + 1) % m_Ring.Length;
+                    m_Count++;
+                }
+            }
+        }
+
         /// <summary>Discards all buffered audio immediately (barge-in / cancellation).</summary>
         public void Flush()
         {

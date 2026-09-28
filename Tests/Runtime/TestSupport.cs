@@ -238,6 +238,11 @@ namespace SplatPresso.Tests
             s.voiceBackend = VoiceBackendKind.GenpressoChat;
             s.sendFrameWithSpeech = false;
             s.runInBackground = true;
+            // Automatic warm-ups would add TripoSplat submits that the pipeline tests count exactly; WarmUpTests
+            // enable it explicitly.
+            s.warmUpModels = false;
+            // Spoken replies would add text-to-speech jobs to every voice test; ReplySpeakerTests enable them.
+            s.speakReplies = false;
             return s;
         }
     }
