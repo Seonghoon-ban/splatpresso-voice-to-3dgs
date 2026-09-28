@@ -27,8 +27,9 @@
 12. [문제 해결](#문제-해결)
 13. [스크립트 API](#스크립트-api)
 14. [제한 사항](#제한-사항)
-15. [패키지 구조](#패키지-구조)
-16. [크레딧 & 라이선스](#크레딧--라이선스)
+15. [검증 상태](#검증-상태-010)
+16. [패키지 구조](#패키지-구조)
+17. [크레딧 & 라이선스](#크레딧--라이선스)
 
 ---
 
@@ -69,7 +70,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| Unity | **6000.0 이상** (0.1.0은 6000.0.63f1 / URP 17.0.4 / Windows D3D12에서 개발) |
+| Unity | **6000.0 이상** (0.1.0은 **6000.0.63f1 (URP 17.0.4)** 과 **6000.2.6f2 (URP 17.2)**, Windows D3D12에서 검증) |
 | 렌더 파이프라인 | **URP 17 + Render Graph** (Compatibility Mode 꺼짐). Built-in 프로젝트는 Setup이 URP 에셋을 만들어 줍니다. |
 | 그래픽 API | Windows **D3D12 / Vulkan**, macOS **Metal**. DX11·OpenGL에서는 스플랫이 렌더링되지 않습니다. |
 | Gaussian Splatting 렌더러 | **1.1.0 이상, 2.0 미만** (1.1.0은 Render Graph를 지원하는 첫 버전; 호환이 확인되지 않은 2.x는 안전하게 비활성화). 없으면 부트스트랩이 고정 커밋을 설치합니다(아래). |
@@ -519,6 +520,17 @@ depth 캡처는 자체 URP 렌더 패스와 셰이더로 하며, 렌더러 내�
 이미 설치된 렌더러가 1.1.0 미만이면 SplatPresso 본체는 컴파일되지 않고, 부트스트랩이 콘솔에 `SplatPresso needs Gaussian Splatting >= 1.1.0` 오류를 냅니다.
 1.1.0 이상인데 이 필드가 없으면(내부 구조가 바뀐 버전·포크) 시작 시와 **Validate Project** 에서 `GaussianSplatting version mismatch` 오류를 냅니다.
 런타임 스플랫 에셋은 렌더러의 공개 API(`GaussianSplatAsset`)로 만듭니다.
+
+## 검증 상태 (0.1.0)
+
+| 항목 | 결과 |
+|---|---|
+| 빈 프로젝트에 git URL 한 줄 설치 → 부트스트랩이 렌더러 자동 설치 → 컴파일 | 6000.0.63f1, 6000.2.6f2 모두 통과 (에러·경고 0) |
+| EditMode 테스트 (Bbox, 배치 수학, PLY→런타임 에셋, upstream 임포터와 바이트 단위 레이아웃 비교, 키 해석, 에러 파싱 등) | 95/95 통과 |
+| PlayMode 테스트 (실제 GPU 렌더 + RGB/depth 캡처, 모의 GenPresso 서버로 Scene-aware·Direct·Mesh 전체 파이프라인, 음성 텍스트 턴) | 18/18 통과 (Input System 전용 프로젝트 포함) |
+| Windows 플레이어 빌드 (Mono, Managed Stripping High) | 런타임 에셋·리플렉션 브리지·캡처·전체 파이프라인(모의 서버) 정상 |
+| 실제 GenPresso API 호출 | **미검증** — 모의 서버는 문서화된 규약과 meshpresso에서 확인한 특이 동작을 재현합니다. 처음 사용할 때 **Project Settings > SplatPresso > Test + Probe Media Models** 로 모델 경로(특히 TripoSplat)를 확인하세요. |
+| 실제 마이크 음성 턴 / OpenAI Realtime | 코드 경로와 WebSocket은 로컬에서 검증, 실제 서비스 호출은 미검증 |
 
 ## 패키지 구조
 
