@@ -60,7 +60,9 @@ namespace SplatPresso.Voice
             if (lang == null)
             {
                 string fallback = string.IsNullOrWhiteSpace(fallbackLanguage) ? DefaultFallbackLanguage : fallbackLanguage.Trim();
-                return $"Reply in the language the user spoke; if unsure, reply in {fallback}. Never mix languages within a reply.";
+                return $"Reply in the language of the user's most recent utterance, including when relaying [PIPELINE] notices " +
+                       $"(they are written in English but must be spoken in the user's language); before the user has spoken, " +
+                       $"or if truly unsure, use {fallback}. Never mix languages within a reply.";
             }
             if (language == ReplyLanguage.English)
                 return "ALWAYS speak English, even if the user used another language. Never mix languages within a reply.";

@@ -168,8 +168,33 @@ namespace SplatPresso.Api
             r.lines.Add("Media provider: " + s.mediaProvider + (s.mediaProvider == MediaProvider.FalDirect && !r.hasFalKey ? " (FAL_KEY MISSING)" : ""));
             r.lines.Add("fal.ai key: " + (r.hasFalKey ? "present" : "not set") +
                         (s.falFallbackWhenMissing ? " (used only as a fallback when a GenPresso path is missing)" : ""));
-            if (s.voiceBackend == VoiceBackendKind.OpenAIRealtime)
-                r.lines.Add("OpenAI key (Realtime voice): " + (r.hasOpenAIKey ? "present" : "MISSING"));
+            var voice = SplatPresso.Voice.VoiceAgent.ResolveBackend(s.voiceBackend, r.hasOpenAIKey, SplatPresso.Voice.RealtimeSocket.IsSupported);
+            r.lines.Add($"Voice agent ({s.voiceBackend}): " + (voice == VoiceBackendKind.OpenAIRealtime
+                ? "OpenAI Realtime (fast speech-to-speech)"
+                : voice == VoiceBackendKind.None ? "off"
+                : "GenPresso chat + GenPresso TTS" + (r.hasOpenAIKey ? "" : " (save an OpenAI key for fast realtime voice)")));
+            if (s.voiceBackend == VoiceBackendKind.OpenAIRealtime && !r.hasOpenAIKey)
+                r.lines.Add("OpenAI key (Realtime voice): MISSING");
+            if (r.hasOpenAIKey && (s.voiceBackend == VoiceBackendKind.OpenAIRealtime || s.voiceBackend == VoiceBackendKind.Auto))
+            {
+                // free check of the key and the realtime model (the WebSocket itself is only opened in play mode)
+                string model = string.IsNullOrWhiteSpace(s.realtimeModel) ? "gpt-realtime-2.1" : s.realtimeModel.Trim();
+                string openAIKey = ApiKeys.Get(ApiKeyKind.OpenAI, out KeySource openAISource);
+                try
+                {
+                    var probe = await HttpJson.SendAsync("GET", "https://api.openai.com/v1/models/" + Uri.EscapeDataString(model), null, null,
+                        new Dictionary<string, string> { { "Authorization", "Bearer " + openAIKey } }, 15, ct, throwOnHttpError: false);
+                    var kind = SplatPresso.Voice.RealtimeSocket.InterpretModelProbe(probe.StatusCode, probe.Text, model, out string diagnosis);
+                    r.lines.Add($"OpenAI key {ApiKeys.Mask(openAIKey)} (source: {openAISource}), model '{model}': " +
+                                (probe.StatusCode == 200 ? "OK" : kind != SplatPresso.Voice.RealtimeSocket.FailureKind.None
+                                    ? "PROBLEM - " + diagnosis + (s.voiceBackend == VoiceBackendKind.Auto ? " (Auto will fall back to GenPresso voice)" : "")
+                                    : "could not be confirmed (" + (diagnosis ?? "no answer") + ")"));
+                }
+                catch (GenpressoException e)
+                {
+                    r.lines.Add("OpenAI key check: " + e.Message);
+                }
+            }
 
             // 4. Optional media path probes (the first present candidate per route is cached, unless a candidate
             //    listed before it could not be checked).

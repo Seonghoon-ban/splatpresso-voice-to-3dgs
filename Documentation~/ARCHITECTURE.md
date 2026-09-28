@@ -74,7 +74,7 @@ Setup puts these on one `SplatPresso` GameObject (references are auto-resolved i
 | Component | Role |
 |---|---|
 | `SplatPressoRoot` | Public entry point. Owns runs (one `PlacementOrchestrator` + one session per run), capacity guard, request gate, mode/representation, M/N hotkeys, narration of milestones to the voice agent, aggregated events with `runId` |
-| `VoiceAgent` | Facade over `IVoiceBackend` (`GenpressoVoiceBackend` default, `OpenAIRealtimeBackend` optional), push-to-talk edge detection, mic, snapshot, text submit |
+| `VoiceAgent` | Facade over `IVoiceBackend`: `voiceBackend = Auto` (default) runs `OpenAIRealtimeBackend` when an OpenAI key exists, else `GenpressoVoiceBackend`, and falls back to the latter when Realtime fails for good (key / model / quota / no WebSockets); push-to-talk edge detection, silence guard, mic, snapshot, text submit |
 | `MicCapture` / `AudioStreamPlayer` | Warm microphone with 0.35 s pre-roll and a capped utterance buffer (16 kHz chat / 24 kHz realtime); streamed 24 kHz PCM playback (Realtime audio and spoken GenPresso replies) |
 | `ReplySpeaker` (plain class, owned by `VoiceAgent`) | Speaks GenPresso chat replies: `textToSpeech` media route (MiniMax speech-02-turbo, 24 kHz PCM; other routes decoded as WAV/MP3), ungated and fast-polled, in order, cancelled by push-to-talk |
 | `ModelWarmer` (static) | Free warm-up requests (inputs that fail validation) that boot the 3D model's worker on talk / typing / run start, and keep it warm while the user is active |

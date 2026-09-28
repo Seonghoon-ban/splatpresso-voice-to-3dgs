@@ -15,12 +15,14 @@ namespace SplatPresso
     /// <summary>Voice front end.</summary>
     public enum VoiceBackendKind
     {
-        /// <summary>Push-to-talk WAV sent to GenPresso chat/completions (GenPresso key only).</summary>
+        /// <summary>Push-to-talk WAV sent to GenPresso chat/completions, replies spoken by GenPresso TTS (GenPresso key only; ~13 s to the spoken reply).</summary>
         GenpressoChat,
-        /// <summary>OpenAI Realtime over WebSocket (needs OPENAI_API_KEY).</summary>
+        /// <summary>OpenAI Realtime speech-to-speech over WebSocket (needs an OpenAI key; ~1.5 s to the spoken reply).</summary>
         OpenAIRealtime,
         /// <summary>No voice; requests come from code, the text box or the debug tools.</summary>
         None,
+        /// <summary>OpenAIRealtime when an OpenAI key is configured (and WebSockets exist), else GenpressoChat. Default.</summary>
+        Auto,
     }
 
     /// <summary>Language the agent replies in.</summary>
@@ -53,7 +55,7 @@ namespace SplatPresso
     /// can be loaded in players via <c>Resources.Load</c>. API keys should NOT be stored here (see <see cref="ApiKeys"/>).
     /// </summary>
     [CreateAssetMenu(menuName = "SplatPresso/Settings", fileName = "SplatPressoSettings")]
-    public sealed class SplatPressoSettings : ScriptableObject
+    public sealed class SplatPressoSettings : ScriptableObject, ISerializationCallbackReceiver
     {
         /// <summary>Resources name of the settings asset.</summary>
         public const string ResourceName = "SplatPressoSettings";
@@ -132,7 +134,9 @@ namespace SplatPresso
         [Range(1, 64)] public int maxSpawnedObjects = 24;
 
         [Header("Voice")]
-        public VoiceBackendKind voiceBackend = VoiceBackendKind.GenpressoChat;
+        [Tooltip("Auto (default): OpenAI Realtime when an OpenAI key is saved (fast speech-to-speech, ~1.5 s), otherwise GenPresso " +
+                 "chat + GenPresso TTS (GenPresso key only, ~13 s). GenpressoChat / OpenAIRealtime force one; None turns voice off.")]
+        public VoiceBackendKind voiceBackend = VoiceBackendKind.Auto;
         public ReplyLanguage replyLanguage = ReplyLanguage.Auto;
         [Tooltip("Reply language when Auto cannot tell which language the user speaks.")]
         public string fallbackLanguage = "English";
@@ -161,7 +165,8 @@ namespace SplatPresso
         [TextArea(2, 6)] public string customInstructions = "";
         [Tooltip("OpenAI Realtime model (OpenAIRealtime backend only).")]
         public string realtimeModel = "gpt-realtime-2.1";
-        [Tooltip("OpenAI Realtime voice (OpenAIRealtime backend only).")]
+        [Tooltip("OpenAI Realtime voice (Realtime backend only): alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin or cedar. " +
+                 "Not a MiniMax id (that is ttsVoice). An unknown voice is replaced by cedar.")]
         public string realtimeVoice = "cedar";
         [Tooltip("false = push-to-talk (recommended with speakers), true = semantic VAD (headphones).")]
         public bool useSemanticVad = false;
@@ -276,8 +281,30 @@ namespace SplatPresso
             }
         }
 
+        // Asset format version. 0 = written before 0.3.0, when GenpressoChat was the default voice backend: such assets
+        // move to Auto once (identical without an OpenAI key; Realtime once one is saved). Kept at 0 in the initializer
+        // on purpose: Unity keeps initializer values for fields missing from old assets.
+        const int kSettingsVersion = 1;
+        [SerializeField, HideInInspector] int settingsVersion;
+
+        void ISerializationCallbackReceiver.OnBeforeSerialize() { }
+
+        void ISerializationCallbackReceiver.OnAfterDeserialize()
+        {
+            if (settingsVersion >= kSettingsVersion)
+                return;
+            if (voiceBackend == VoiceBackendKind.GenpressoChat)
+                voiceBackend = VoiceBackendKind.Auto;
+            settingsVersion = kSettingsVersion;
+        }
+
+        // Runs after OnAfterDeserialize for loaded assets and right away for CreateInstance / Instantiate: from here on the
+        // instance is current, so a later deserialization never "migrates" a choice made after loading.
+        void OnEnable() => settingsVersion = kSettingsVersion;
+
         void OnValidate()
         {
+            settingsVersion = kSettingsVersion; // an explicit choice made from now on is kept
             // routes / tuning can only be null when an asset was edited by hand; restore the defaults
             edit ??= DefaultRoute(MediaRouteKeys.Edit);
             editFallback ??= DefaultRoute(MediaRouteKeys.EditFallback);

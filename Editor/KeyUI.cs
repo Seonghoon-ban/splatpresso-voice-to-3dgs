@@ -109,6 +109,28 @@ namespace SplatPresso.EditorTools
             }
         }
 
+        // In play mode a saved or removed key takes effect at once: a voice agent whose backend choice changed (Auto:
+        // Realtime with an OpenAI key, GenPresso without) is restarted; a failed Realtime backend retries with the new key.
+        static void RestartVoiceAgentsIfNeeded(ApiKeyKind changed)
+        {
+            // only the OpenAI key decides between Realtime and the GenPresso voice agent
+            if (!EditorApplication.isPlaying || changed != ApiKeyKind.OpenAI)
+                return;
+            bool hasOpenAI = ApiKeys.Has(ApiKeyKind.OpenAI);
+            foreach (var agent in UnityEngine.Object.FindObjectsByType<SplatPresso.Voice.VoiceAgent>(FindObjectsSortMode.None))
+            {
+                if (!agent.IsRunning)
+                    continue;
+                // a new OpenAI key deserves a fresh try even after an Auto fallback
+                var wanted = SplatPresso.Voice.VoiceAgent.ResolveBackend(agent.Settings.voiceBackend, hasOpenAI, SplatPresso.Voice.RealtimeSocket.IsSupported);
+                bool failed = agent.RealtimeBackend != null && agent.RealtimeBackend.HasFailed;
+                if (wanted == agent.ActiveBackend && !failed)
+                    continue;
+                Debug.Log($"[SplatPresso] Restarting the voice agent with the new key ({agent.ActiveBackend} -> {wanted})");
+                agent.RestartBackend();
+            }
+        }
+
         static void Save(ApiKeyKind kind, string label)
         {
             int i = (int)kind;
@@ -127,6 +149,7 @@ namespace SplatPresso.EditorTools
                 if (source == KeySource.Override || source == KeySource.Environment)
                     msg += $" Note: {SourceLabel(kind, source)} still takes priority over the saved key.";
                 Debug.Log(msg);
+                RestartVoiceAgentsIfNeeded(kind);
             }
             catch (Exception e)
             {
@@ -143,6 +166,7 @@ namespace SplatPresso.EditorTools
                 ApiKeys.ClearFromUserProfile(kind);
                 ApiKeys.Reset();
                 Debug.Log($"[SplatPresso] Removed the {label} key from {ApiKeys.UserProfileKeysPath}.");
+                RestartVoiceAgentsIfNeeded(kind);
             }
             catch (Exception e)
             {

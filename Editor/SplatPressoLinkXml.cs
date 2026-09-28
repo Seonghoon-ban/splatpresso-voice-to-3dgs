@@ -12,6 +12,10 @@ namespace SplatPresso.EditorTools
     /// type in SplatPresso's own assemblies (decision, verification, voice turn, ledger, path cache...) is created
     /// only through Newtonsoft reflection. Without this, High stripping removed the parameterless constructor of
     /// VoiceTurnResponse in a player build and every voice turn failed to deserialize.
+    /// The OpenAI Realtime backend's <c>ClientWebSocket</c> handshake goes through <c>ServicePointManager</c>, which reads
+    /// the .NET configuration system and creates its section handlers and web request modules by name: with High
+    /// stripping every connect failed with "Default constructor not found for type
+    /// System.Configuration.ExeConfigurationHost" (live player test).
     /// </summary>
     /// <remarks>
     /// A link.xml inside a package is not reliably picked up, so it is emitted here. It is written to a physical
@@ -28,6 +32,14 @@ namespace SplatPresso.EditorTools
             "  </assembly>\n" +
             "  <assembly fullname=\"SplatPresso.Runtime\" preserve=\"all\"/>\n" +
             "  <assembly fullname=\"SplatPresso.Mesh\" ignoreIfMissing=\"1\" preserve=\"all\"/>\n" +
+            "  <assembly fullname=\"System.Configuration\" ignoreIfMissing=\"1\" preserve=\"all\"/>\n" +
+            "  <assembly fullname=\"System\">\n" +
+            "    <type fullname=\"System.Net.Configuration.*\" preserve=\"all\"/>\n" +
+            "    <type fullname=\"System.Net.HttpRequestCreator\" preserve=\"all\"/>\n" +
+            "    <type fullname=\"System.Net.FileWebRequestCreator\" preserve=\"all\"/>\n" +
+            "    <type fullname=\"System.Net.FtpRequestCreator\" preserve=\"all\"/>\n" +
+            "    <type fullname=\"System.Net.WebSockets.*\" preserve=\"all\"/>\n" +
+            "  </assembly>\n" +
             "</linker>\n";
 
         public int callbackOrder => 0;

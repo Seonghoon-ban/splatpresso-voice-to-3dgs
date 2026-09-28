@@ -13,9 +13,10 @@ namespace SplatPresso.Voice
     /// <see cref="IVoiceBackend"/> (<see cref="VoiceBackendKind"/> in the settings).
     /// </summary>
     /// <remarks>
-    /// Backend selection: GenpressoChat (default, GenPresso key only), OpenAIRealtime (needs an OpenAI key; falls
-    /// back to GenpressoChat with a warning when the key is missing or WebSockets are unavailable), None (no
-    /// microphone; typed requests still go through a text-only GenPresso chat backend).
+    /// Backend selection: Auto (default: OpenAIRealtime when an OpenAI key is configured, else GenpressoChat),
+    /// GenpressoChat (GenPresso key only), OpenAIRealtime (needs an OpenAI key; falls back to GenpressoChat with a
+    /// warning when the key is missing or WebSockets are unavailable), None (no microphone; typed requests still go
+    /// through a text-only GenPresso chat backend).
     /// With the GenPresso chat backend, replies are spoken through GenPresso text-to-speech
     /// (<see cref="SplatPressoSettings.speakReplies"/>, <see cref="ReplySpeaker"/>); Realtime speaks by itself.
     /// </remarks>
@@ -73,13 +74,17 @@ namespace SplatPresso.Voice
         float m_NextCaptureServiceLookup;
         Func<Awaitable<byte[]>> m_CaptureFunc;
         ReplySpeaker m_Speaker;
+        bool m_AutoRealtimeFailed; // Auto: Realtime failed for good (key / model rejected...) -> GenPresso voice
+        float m_RealtimeStartedAt;
+        bool m_RealtimeEverReady;
+        const float kAutoRealtimeConnectGraceSec = 30f; // Auto: never ready this long (blocked WebSockets...) -> GenPresso
 
         // ------------------------------------------------------------------------------------------
         // state
 
         /// <summary>Settings in use.</summary>
         public SplatPressoSettings Settings => settings != null ? settings : SplatPressoSettings.Active;
-        /// <summary>The running backend kind (None when stopped or voice is off).</summary>
+        /// <summary>The running backend kind, resolved (never Auto; None when stopped or voice is off).</summary>
         public VoiceBackendKind ActiveBackend { get; private set; } = VoiceBackendKind.None;
         /// <summary>The running backend (null when stopped).</summary>
         public IVoiceBackend Backend => m_Backend;
@@ -180,6 +185,7 @@ namespace SplatPresso.Voice
                 try { backend.Tick(); }
                 catch (Exception e) { Debug.LogException(e); }
             }
+            FallBackWhenRealtimeFails();
             UpdatePushToTalk();
             UpdateHandsFreeCapture();
         }
@@ -210,6 +216,8 @@ namespace SplatPresso.Voice
 
             ActiveBackend = kind;
             m_Backend = backend;
+            m_RealtimeStartedAt = Time.unscaledTime;
+            m_RealtimeEverReady = false;
             backend.UserTranscript += HandleUserTranscript;
             backend.AgentReply += HandleAgentReply;
             backend.PlacementRequested += HandlePlacementRequested;
@@ -238,14 +246,42 @@ namespace SplatPresso.Voice
         public void StopBackend()
         {
             m_ExplicitlyStopped = true;
+            m_AutoRealtimeFailed = false;
             TearDown(abort: false);
         }
 
-        /// <summary>Stops and starts again, e.g. after changing <see cref="SplatPressoSettings.voiceBackend"/>.</summary>
+        /// <summary>
+        /// Stops and starts again, e.g. after changing <see cref="SplatPressoSettings.voiceBackend"/> or saving an
+        /// OpenAI key (Auto then tries Realtime again even if it failed before).
+        /// </summary>
         public void RestartBackend()
         {
+            m_AutoRealtimeFailed = false;
             TearDown(abort: false);
             StartBackend();
+        }
+
+        // Auto must never leave the user without a voice agent: when Realtime fails for good (key rejected, no access
+        // to the model, no quota, no WebSocket support in this build) or never connects at all, switch to the GenPresso
+        // chat backend. A connection that worked once and drops keeps reconnecting instead.
+        void FallBackWhenRealtimeFails()
+        {
+            if (m_AutoRealtimeFailed || Settings.voiceBackend != VoiceBackendKind.Auto || ActiveBackend != VoiceBackendKind.OpenAIRealtime)
+                return;
+            var realtime = RealtimeBackend;
+            if (realtime == null)
+                return;
+            if (realtime.IsAvailable)
+                m_RealtimeEverReady = true;
+            // never ready at all (a network that blocks WebSockets, a proxy-only network...): GenPresso works over HTTPS
+            bool neverReady = !m_RealtimeEverReady && Time.unscaledTime - m_RealtimeStartedAt > kAutoRealtimeConnectGraceSec;
+            if (!realtime.HasFailed && !neverReady)
+                return;
+            string why = realtime.LastSocketError ?? (neverReady ? $"not connected after {kAutoRealtimeConnectGraceSec:F0} s" : "unknown error");
+            m_AutoRealtimeFailed = true;
+            TearDown(abort: false);
+            StartBackend();
+            ReportError($"OpenAI Realtime is unavailable ({why}); using the GenPresso voice agent instead.");
         }
 
         /// <summary>Starts a push-to-talk turn from code (e.g. an XR button press). Pair with <see cref="EndTalk"/>.</summary>
@@ -406,6 +442,13 @@ namespace SplatPresso.Voice
             }
             if (!m_Backend.IsAvailable)
             {
+                // an explicitly chosen Realtime backend that gave up: pressing talk tries again
+                if (RealtimeBackend != null && RealtimeBackend.HasFailed)
+                {
+                    ReportNotReady();
+                    RestartBackend();
+                    return;
+                }
                 ReportNotReady();
                 return;
             }
@@ -461,7 +504,7 @@ namespace SplatPresso.Voice
             {
                 string why = RealtimeBackend?.LastSocketError;
                 ReportError(string.IsNullOrEmpty(why)
-                    ? "The OpenAI Realtime voice agent is still connecting."
+                    ? "The OpenAI Realtime voice agent is still connecting (a moment after start)."
                     : "The OpenAI Realtime voice agent is not connected: " + why);
             }
             else
@@ -470,23 +513,53 @@ namespace SplatPresso.Voice
             }
         }
 
-        // OpenAIRealtime falls back to GenpressoChat when it cannot run (no OpenAI key, no WebSockets on WebGL).
+        /// <summary>The backend this agent would start now (applies the Auto fallback after a Realtime failure).</summary>
+        public VoiceBackendKind WantedBackend => ResolveBackendKind(log: false);
+
+        /// <summary>
+        /// The backend a configured <paramref name="configured"/> kind runs as: Auto is OpenAIRealtime when an OpenAI key
+        /// exists and WebSockets are supported, else GenpressoChat; OpenAIRealtime falls back to GenpressoChat when it
+        /// cannot run; GenpressoChat and None run as configured.
+        /// </summary>
+        public static VoiceBackendKind ResolveBackend(VoiceBackendKind configured, bool hasOpenAIKey, bool webSocketsSupported)
+        {
+            bool realtimePossible = hasOpenAIKey && webSocketsSupported;
+            switch (configured)
+            {
+                case VoiceBackendKind.Auto:
+                case VoiceBackendKind.OpenAIRealtime:
+                    return realtimePossible ? VoiceBackendKind.OpenAIRealtime : VoiceBackendKind.GenpressoChat;
+                default:
+                    return configured;
+            }
+        }
+
         VoiceBackendKind ResolveBackendKind(bool log)
         {
-            var kind = Settings.voiceBackend;
-            if (kind != VoiceBackendKind.OpenAIRealtime)
+            var configured = Settings.voiceBackend;
+            string key = ApiKeys.Get(ApiKeyKind.OpenAI, out KeySource keySource);
+            bool hasKey = !string.IsNullOrEmpty(key);
+            bool sockets = RealtimeSocket.IsSupported;
+            var kind = ResolveBackend(configured, hasKey, sockets);
+            if (configured == VoiceBackendKind.Auto && m_AutoRealtimeFailed)
+                kind = VoiceBackendKind.GenpressoChat;
+            if (!log)
                 return kind;
-            if (!RealtimeSocket.IsSupported)
+            if (configured == VoiceBackendKind.Auto)
             {
-                if (log)
-                    Debug.LogWarning("[SplatPresso] OpenAI Realtime is not supported on this platform; using the GenPresso chat voice backend");
-                return VoiceBackendKind.GenpressoChat;
+                Debug.Log(m_AutoRealtimeFailed
+                    ? "[SplatPresso] Voice backend Auto: OpenAI Realtime failed earlier, using GenPresso chat (RestartBackend() tries Realtime again)"
+                    : kind == VoiceBackendKind.OpenAIRealtime
+                        ? $"[SplatPresso] Voice backend Auto: OpenAI key found ({keySource}), using OpenAI Realtime"
+                        : !sockets
+                            ? "[SplatPresso] Voice backend Auto: no WebSockets on this platform, using GenPresso chat"
+                            : "[SplatPresso] Voice backend Auto: no OpenAI key, using GenPresso chat (save an OpenAI key in Project Settings > SplatPresso for fast realtime voice)");
             }
-            if (!ApiKeys.Has(ApiKeyKind.OpenAI))
+            else if (configured == VoiceBackendKind.OpenAIRealtime && kind != VoiceBackendKind.OpenAIRealtime)
             {
-                if (log)
-                    Debug.LogWarning("[SplatPresso] Voice backend is OpenAIRealtime but no OpenAI key is configured (OPENAI_API_KEY); using the GenPresso chat voice backend");
-                return VoiceBackendKind.GenpressoChat;
+                ReportError(!sockets
+                    ? "OpenAI Realtime is not supported on this platform; using the GenPresso voice agent."
+                    : "Voice backend is OpenAIRealtime but no OpenAI key is configured (Project Settings > SplatPresso or OPENAI_API_KEY); using the GenPresso voice agent.");
             }
             return kind;
         }

@@ -340,6 +340,20 @@ namespace SplatPresso.EditorTools
                 r.Add(ValidationSeverity.Warning, "No GenPresso API key on this machine (Project Settings > SplatPresso; get one at " + SplatPressoEditorUtil.KeyPortalUrl + ").");
             else
                 r.Add(ValidationSeverity.Ok, $"GenPresso key {ApiKeys.Mask(key)} ({source})");
+
+            // which voice agent will answer (Auto = Realtime as soon as an OpenAI key exists)
+            var configured = settings != null ? settings.voiceBackend : VoiceBackendKind.Auto;
+            string openAIKey = ApiKeys.Get(ApiKeyKind.OpenAI, out var openAISource);
+            bool hasOpenAI = !string.IsNullOrEmpty(openAIKey);
+            var voice = SplatPresso.Voice.VoiceAgent.ResolveBackend(configured, hasOpenAI, SplatPresso.Voice.RealtimeSocket.IsSupported);
+            if (configured == VoiceBackendKind.OpenAIRealtime && !hasOpenAI)
+                r.Add(ValidationSeverity.Warning, "voiceBackend is OpenAIRealtime but no OpenAI key is configured: the slower GenPresso voice agent will run " +
+                                                  "(save an OpenAI key in Project Settings > SplatPresso).");
+            else if (voice == VoiceBackendKind.OpenAIRealtime)
+                r.Add(ValidationSeverity.Ok, $"Voice agent: OpenAI Realtime (voiceBackend {configured}, OpenAI key {ApiKeys.Mask(openAIKey)} from {openAISource})");
+            else if (voice == VoiceBackendKind.GenpressoChat)
+                r.Add(ValidationSeverity.Ok, $"Voice agent: GenPresso chat + TTS (voiceBackend {configured}" +
+                                             (hasOpenAI ? ")" : "; save an OpenAI key for the fast realtime voice agent)"));
         }
 
         static void CheckScenes(ValidationReport r, bool forBuild)

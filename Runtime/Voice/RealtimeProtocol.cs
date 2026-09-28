@@ -18,10 +18,11 @@ namespace SplatPresso.Voice
         /// session.update with instructions, tools, audio formats, voice and turn detection
         /// (null = push-to-talk; semantic_vad when <see cref="SplatPressoSettings.useSemanticVad"/>).
         /// </summary>
-        public static JObject SessionUpdate(SplatPressoSettings s, string instructions, JArray tools)
+        public static JObject SessionUpdate(SplatPressoSettings s, string instructions, JArray tools, string voiceOverride = null)
         {
             bool vad = s != null && s.useSemanticVad;
-            string voice = s != null && !string.IsNullOrWhiteSpace(s.realtimeVoice) ? s.realtimeVoice.Trim() : "cedar";
+            string voice = !string.IsNullOrWhiteSpace(voiceOverride) ? voiceOverride.Trim()
+                : s != null && !string.IsNullOrWhiteSpace(s.realtimeVoice) ? s.realtimeVoice.Trim() : "cedar";
             return new JObject
             {
                 ["type"] = RealtimeEventNames.SessionUpdate,

@@ -17,17 +17,32 @@ namespace SplatPresso.Voice
     {
         const string kRealtimeUrl = "wss://api.openai.com/v1/realtime?model=";
         const float kResponseRequestTimeoutSec = 15f;
-        // Input transcription completes asynchronously and can arrive AFTER the response.done carrying the tool
-        // call; placement events wait this long for the turn's own transcript (L10: the old code joined the
-        // PREVIOUS utterance instead).
-        const float kTranscriptWaitSec = 2f;
+        // session.updated normally follows session.created within ~0.3 s; if it never comes (rejected update) the
+        // backend still opens for turns after this long instead of locking the user out.
+        const float kSessionReadyFailOpenSec = 3f;
         const int kMaxRememberedTranscripts = 16;
+        // Harmless races between our requests and the server's own responses: logged, never shown on the HUD.
+        static readonly HashSet<string> s_BenignErrorCodes = new HashSet<string>
+        {
+            "response_cancel_not_active", "conversation_already_has_active_response", "input_audio_buffer_commit_empty",
+        };
+        // The key, model or account cannot be used: retrying cannot help.
+        static readonly HashSet<string> s_FatalErrorCodes = new HashSet<string>
+        {
+            "invalid_api_key", "model_not_found", "invalid_model", "insufficient_quota", "account_deactivated",
+        };
         // Semantic VAD: a response deferred while the user spoke is normally covered by the response the server
         // creates for the user's turn; if none has started this long after speech_stopped, it is sent after all.
         const float kVadResponseGraceSec = 1.5f;
         // Safety net: speech_stopped never arrives when the mic stops streaming mid-utterance (device lost); do not
         // keep deferring responses / muting the agent forever.
         const float kMaxVadSpeechSec = 30f;
+
+        /// <summary>
+        /// Realtime WebSocket endpoint the model name is appended to (<c>...?model=</c>); null = OpenAI. For tests
+        /// (a local mock server) and proxies. Read when the backend starts.
+        /// </summary>
+        public static string EndpointOverride { get; set; }
 
         public event Action<string> UserTranscript;
         public event Action<string> AgentReply;
@@ -62,21 +77,23 @@ namespace SplatPresso.Voice
         bool m_FrameSendUnsupported;
         bool m_SessionLogged;
         bool m_TranscriptionFallbackTried;
+        bool m_SessionReady;          // session.updated received: instructions, tools and push-to-talk are in effect
+        float m_SessionCreatedAt = -1f;
+        string m_SessionEventId;
+        bool m_SessionSafeRetried;    // a rejected session.update was re-sent once with the default voice
 
-        // source-utterance join (L10)
+        // the view snapshot is taken while push-to-talk is held, so releasing it does not wait for the capture
+        int m_FrameSeq;
+        bool m_FrameCapturing;
+        byte[] m_HeldFrame;
+        bool m_ReleaseWaitsForFrame;
+
+        // source utterance of a placement (for logs and RunStarted); never delays the placement itself
         string m_TurnItemId;         // input item of the current turn (from input_audio_buffer.committed)
         string m_TurnTypedText;      // typed text of the current turn (SubmitText)
         readonly Dictionary<string, string> m_Transcripts = new Dictionary<string, string>();
         readonly Queue<string> m_TranscriptOrder = new Queue<string>();
-        readonly List<PendingPlacement> m_PendingPlacements = new List<PendingPlacement>();
         readonly HashSet<string> m_UnknownEventTypes = new HashSet<string>();
-
-        sealed class PendingPlacement
-        {
-            public PlacementRequest request;
-            public string itemId;
-            public float deadline;
-        }
 
         /// <summary>
         /// Base64 characters of audio received for the current response. 0 with a transcript means the model
@@ -84,16 +101,42 @@ namespace SplatPresso.Voice
         /// </summary>
         public int AudioBytesThisResponse { get; private set; }
 
+        string m_ActiveResponseId;
+        readonly HashSet<string> m_CancelledResponseIds = new HashSet<string>();
+
+        // Cancels the active response; its audio still in flight is dropped when it arrives.
+        void CancelActiveResponse()
+        {
+            Send(RealtimeProtocol.ResponseCancel());
+            if (!string.IsNullOrEmpty(m_ActiveResponseId))
+            {
+                if (m_CancelledResponseIds.Count > 32)
+                    m_CancelledResponseIds.Clear();
+                m_CancelledResponseIds.Add(m_ActiveResponseId);
+            }
+        }
+
         /// <summary>True while the server is producing a response.</summary>
         public bool IsResponseActive => m_ResponseActive;
 
         /// <summary>Last reason the socket closed or failed.</summary>
         public string LastSocketError => m_Socket != null ? m_Socket.LastError : m_StartError;
 
-        /// <summary>True when the backend gave up: no key, unsupported platform, rejected handshake or too many reconnects.</summary>
+        /// <summary>True when the backend gave up: no key, unsupported platform, rejected key / model, or a build without WebSocket support.</summary>
         public bool HasFailed => m_StartError != null || (m_Socket != null && m_Socket.State == RealtimeSocket.SocketState.Failed);
 
-        public bool IsAvailable => m_Socket != null && m_Socket.IsConnected;
+        /// <summary>Why the backend failed (<see cref="RealtimeSocket.FailureKind.None"/> while it has not).</summary>
+        public RealtimeSocket.FailureKind FailureKind =>
+            m_StartError != null ? RealtimeSocket.FailureKind.Auth
+            : m_Socket != null && m_Socket.State == RealtimeSocket.SocketState.Failed ? m_Socket.LastFailureKind
+            : RealtimeSocket.FailureKind.None;
+
+        /// <summary>True while the socket is down and being reconnected.</summary>
+        public bool IsReconnecting => m_Socket != null && (m_Socket.State == RealtimeSocket.SocketState.Reconnecting ||
+                                                           m_Socket.State == RealtimeSocket.SocketState.Connecting);
+
+        /// <summary>Connected and the session configuration (instructions, tools, push-to-talk) is in effect.</summary>
+        public bool IsAvailable => m_Socket != null && m_Socket.IsConnected && m_SessionReady;
         public bool IsBusy => m_ResponseActive || m_ResponseRequested || m_TurnFinishing;
         public bool WantsStreamingAudio => true;
 
@@ -137,13 +180,17 @@ namespace SplatPresso.Voice
             }
             string model = string.IsNullOrWhiteSpace(Settings.realtimeModel) ? "gpt-realtime-2.1" : Settings.realtimeModel.Trim();
             Debug.Log($"[SplatPresso] Connecting OpenAI Realtime ({model}, key {ApiKeys.Mask(key)}, {(VadMode ? "semantic VAD" : "push-to-talk")})");
-            m_Socket.Connect(kRealtimeUrl + Uri.EscapeDataString(model), key);
+            m_Socket.Connect((string.IsNullOrWhiteSpace(EndpointOverride) ? kRealtimeUrl : EndpointOverride.Trim()) + Uri.EscapeDataString(model), key);
         }
 
         public void Stop()
         {
             m_Epoch++;
-            FlushPendingPlacements(); // they were acknowledged to the model as "started": still deliver them
+            m_FrameSeq++;
+            m_FrameCapturing = false;
+            m_ReleaseWaitsForFrame = false;
+            m_HeldFrame = null;
+            m_SessionReady = false;
             if (m_Socket != null)
             {
                 m_Socket.OnServerEvent -= HandleServerEvent;
@@ -181,11 +228,20 @@ namespace SplatPresso.Voice
                 Debug.LogWarning("[SplatPresso] Realtime: no speech_stopped after a long time; no longer holding responses back");
                 EndUserSpeech();
             }
+            if (!m_SessionReady && IsConnected && m_SessionCreatedAt >= 0f && now - m_SessionCreatedAt > kSessionReadyFailOpenSec)
+            {
+                Debug.LogWarning("[SplatPresso] Realtime: no session.updated after session.created; accepting turns anyway");
+                m_SessionReady = true;
+            }
             if (m_ResponseRequested && now - m_RequestedAt > kResponseRequestTimeoutSec)
             {
                 Debug.LogWarning("[SplatPresso] Realtime: no response.created for a requested response; clearing the in-flight flag");
                 m_ResponseRequested = false;
                 m_CancelOnCreated = false; // it was meant for that response, not for the user's next one
+                // a half-open TCP connection never reports itself: drop it (the socket reconnects), but only when
+                // nothing at all has moved on it for as long; a slow uplink or a slow model is not a dead connection
+                if (m_Socket != null && m_Socket.SecondsSinceActivity > kResponseRequestTimeoutSec)
+                    m_Socket.DropConnection();
                 MaybeSendPendingResponse();
             }
             else if (VadMode && !m_UserSpeaking && (m_TurnResponsePending || m_NarrationPending) && !IsBusy &&
@@ -193,16 +249,6 @@ namespace SplatPresso.Voice
             {
                 // deferred while the user spoke, and the server started no response for the turn
                 MaybeSendPendingResponse();
-            }
-
-            for (int i = m_PendingPlacements.Count - 1; i >= 0; i--)
-            {
-                var p = m_PendingPlacements[i];
-                if (now < p.deadline)
-                    continue;
-                m_PendingPlacements.RemoveAt(i);
-                string transcript = p.itemId != null && m_Transcripts.TryGetValue(p.itemId, out var t) ? t : null;
-                RaisePlacement(p.request, transcript);
             }
         }
 
@@ -237,11 +283,13 @@ namespace SplatPresso.Voice
                 return;
             m_PttHeld = true;
             m_NarrationPending = false; // the user's turn wins: queued narration is discarded
+            m_FrameSeqStartedAtPress = -1;
             if (!IsConnected)
                 return;
+            StartFrameCapture(); // runs while the user talks; releasing push-to-talk then sends at once
             Send(RealtimeProtocol.InputAudioClear());
             if (m_ResponseActive)
-                Send(RealtimeProtocol.ResponseCancel());
+                CancelActiveResponse();
             else if (m_ResponseRequested)
                 m_CancelOnCreated = true; // it has not started yet: cancel it the moment it does
             m_Ctx?.player?.Flush();
@@ -262,7 +310,10 @@ namespace SplatPresso.Voice
                 return;
             if (utt == null)
             {
-                // too short or aborted: never commit a (possibly empty) buffer
+                // too short, silent or aborted: never commit a (possibly empty) buffer
+                m_FrameSeq++;
+                m_FrameCapturing = false;
+                m_HeldFrame = null;
                 Send(RealtimeProtocol.InputAudioClear());
                 MaybeSendPendingResponse();
                 return;
@@ -270,10 +321,83 @@ namespace SplatPresso.Voice
             // MicCapture.StopCapture already emitted the final chunk synchronously, so it is appended before this commit
             Send(RealtimeProtocol.InputAudioCommit());
             m_TurnTypedText = null;
-            if (Settings.sendFrameWithSpeech && !m_FrameSendUnsupported && captureJpeg != null)
-                FinishTurnWithFrame(captureJpeg);
+            if (m_FrameCapturing)
+            {
+                // the snapshot started at press is still encoding (rare): finish the turn when it lands
+                m_ReleaseWaitsForFrame = true;
+                m_TurnFinishing = true;
+            }
+            else if (m_HeldFrame != null)
+            {
+                SendHeldFrameAndRespond();
+            }
+            else if (Settings.sendFrameWithSpeech && !m_FrameSendUnsupported && captureJpeg != null && m_FrameSeqStartedAtPress != m_FrameSeq)
+            {
+                FinishTurnWithFrame(captureJpeg); // no snapshot was started at press (e.g. not connected then)
+            }
             else
+            {
                 RequestResponse(isUserTurn: true);
+            }
+        }
+
+        int m_FrameSeqStartedAtPress = -1;
+
+        // Push-to-talk press: snapshot the view now (the user looks at what they talk about); it is sent with the turn.
+        void StartFrameCapture()
+        {
+            if (m_ReleaseWaitsForFrame)
+            {
+                // the previous turn was committed but still waited for its snapshot: its response is now covered by
+                // this turn's (it must not stay "finishing" forever)
+                m_TurnFinishing = false;
+                m_TurnResponsePending = true;
+            }
+            m_FrameSeq++;
+            m_HeldFrame = null;
+            m_ReleaseWaitsForFrame = false;
+            m_FrameCapturing = false;
+            var capture = m_Ctx?.captureJpeg;
+            if (!Settings.sendFrameWithSpeech || m_FrameSendUnsupported || capture == null)
+                return;
+            m_FrameSeqStartedAtPress = m_FrameSeq;
+            CaptureFrameAsync(m_FrameSeq, m_Epoch, capture);
+        }
+
+        async void CaptureFrameAsync(int seq, int epoch, Func<Awaitable<byte[]>> capture)
+        {
+            m_FrameCapturing = true;
+            byte[] jpeg = null;
+            try
+            {
+                jpeg = await capture();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[SplatPresso] Speech-turn snapshot failed: {e.Message}");
+            }
+            if (seq != m_FrameSeq || epoch != m_Epoch)
+                return; // superseded by a newer press, a cancelled turn or Stop
+            m_FrameCapturing = false;
+            m_HeldFrame = jpeg != null && jpeg.Length > 0 ? jpeg : Array.Empty<byte>();
+            if (m_ReleaseWaitsForFrame)
+            {
+                m_ReleaseWaitsForFrame = false;
+                m_TurnFinishing = false;
+                SendHeldFrameAndRespond();
+            }
+        }
+
+        void SendHeldFrameAndRespond()
+        {
+            byte[] jpeg = m_HeldFrame;
+            m_HeldFrame = null;
+            if (!IsConnected)
+                return;
+            if (jpeg != null && jpeg.Length > 0 && !m_FrameSendUnsupported)
+                Send(RealtimeProtocol.ConversationItemCreateUserImage("data:image/jpeg;base64," + Convert.ToBase64String(jpeg)));
+            // if push-to-talk was pressed again meanwhile this is deferred: the next turn's response covers it
+            RequestResponse(isUserTurn: true);
         }
 
         public void SubmitText(string text)
@@ -289,7 +413,7 @@ namespace SplatPresso.Voice
             m_NarrationPending = false;
             if (m_ResponseActive)
             {
-                Send(RealtimeProtocol.ResponseCancel());
+                CancelActiveResponse();
                 m_Ctx?.player?.Flush();
             }
             else if (m_ResponseRequested)
@@ -352,7 +476,7 @@ namespace SplatPresso.Voice
             if (IsConnected)
             {
                 if (m_ResponseActive)
-                    Send(RealtimeProtocol.ResponseCancel());
+                    CancelActiveResponse();
                 else if (m_ResponseRequested)
                     m_CancelOnCreated = true;
             }
@@ -408,8 +532,14 @@ namespace SplatPresso.Voice
 
         void Send(JObject clientEvent) => m_Socket?.Send(clientEvent);
 
-        void SendSessionUpdate() =>
-            Send(RealtimeProtocol.SessionUpdate(Settings, VoicePromptLibrary.BuildRealtimeInstructions(Settings), VoicePromptLibrary.BuildRealtimeTools()));
+        void SendSessionUpdate(string voiceOverride = null)
+        {
+            var update = RealtimeProtocol.SessionUpdate(Settings, VoicePromptLibrary.BuildRealtimeInstructions(Settings),
+                VoicePromptLibrary.BuildRealtimeTools(), voiceOverride);
+            m_SessionEventId = "sp_session_" + (++m_EventCounter);
+            update["event_id"] = m_SessionEventId;
+            Send(update);
+        }
 
         // ------------------------------------------------------------------------------------------
         // socket state
@@ -419,21 +549,22 @@ namespace SplatPresso.Voice
             switch (state)
             {
                 case RealtimeSocket.StateConnected:
-                    // session.update is sent on session.created
-                    if (VadMode && m_Ctx?.mic != null && !m_Ctx.mic.IsCapturing)
-                        m_Ctx.mic.StartCapture();
+                    // session.update is sent on session.created; turns open on session.updated
+                    m_SessionReady = false;
+                    m_SessionCreatedAt = -1f;
                     break;
 
                 case RealtimeSocket.StateReconnected:
+                    m_SessionReady = false;
+                    m_SessionCreatedAt = -1f;
                     ResetResponseState();
                     // a new session has no memory of the old conversation
                     Send(RealtimeProtocol.ConversationItemCreateSystemMessage(VoicePromptLibrary.PipelinePrefix + "reconnected; continue the conversation naturally"));
-                    if (VadMode && m_Ctx?.mic != null && !m_Ctx.mic.IsCapturing)
-                        m_Ctx.mic.StartCapture();
                     break;
 
                 case RealtimeSocket.StateReconnecting:
                 case RealtimeSocket.StateClosed:
+                    m_SessionReady = false;
                     ResetResponseState();
                     m_Ctx?.player?.Flush();
                     if (m_Ctx?.mic != null && m_Ctx.mic.IsCapturing && VadMode)
@@ -441,12 +572,16 @@ namespace SplatPresso.Voice
                     break;
 
                 case RealtimeSocket.StateFailed:
+                {
+                    m_SessionReady = false;
                     ResetResponseState();
                     if (m_Ctx?.mic != null && m_Ctx.mic.IsCapturing && VadMode)
                         m_Ctx.mic.CancelCapture();
+                    var kind = m_Socket != null ? m_Socket.LastFailureKind : RealtimeSocket.FailureKind.Other;
                     RaiseError("OpenAI Realtime connection failed: " + (m_Socket?.LastError ?? "unknown error") +
-                               ". Check the OpenAI key and the realtime model name.");
+                               (kind == RealtimeSocket.FailureKind.Auth ? ". Check the OpenAI key and the realtime model name." : "."));
                     break;
+                }
             }
         }
 
@@ -462,12 +597,22 @@ namespace SplatPresso.Voice
                     m_SessionLogged = false;
                     m_TranscriptionFallbackTried = false;
                     m_FrameSendUnsupported = false;
+                    m_SessionSafeRetried = false;
+                    m_SessionReady = false;
+                    m_SessionCreatedAt = Time.unscaledTime;
                     SendSessionUpdate();
                     break;
 
                 case RealtimeEventNames.SessionUpdated:
                 {
                     string payload = e["session"]?.ToString(Formatting.None) ?? "";
+                    if (!m_SessionReady)
+                    {
+                        m_SessionReady = true;
+                        // hands-free: stream the mic only once push-to-talk / VAD settings are in effect
+                        if (VadMode && m_Ctx?.mic != null && !m_Ctx.mic.IsCapturing)
+                            m_Ctx.mic.StartCapture();
+                    }
                     if (!m_SessionLogged)
                     {
                         m_SessionLogged = true;
@@ -489,12 +634,13 @@ namespace SplatPresso.Voice
                     bool requestedByUs = m_ResponseRequested;
                     m_ResponseActive = true;
                     m_ResponseRequested = false;
+                    m_ActiveResponseId = (string)e["response"]?["id"];
                     AudioBytesThisResponse = 0;
                     if (m_CancelOnCreated || UserTalking)
                     {
                         // the user started talking before this response began: do not talk over them
                         m_CancelOnCreated = false;
-                        Send(RealtimeProtocol.ResponseCancel());
+                        CancelActiveResponse();
                         m_Ctx?.player?.Flush();
                     }
                     else if (!requestedByUs && VadMode)
@@ -522,6 +668,9 @@ namespace SplatPresso.Voice
                 case RealtimeEventNames.ResponseAudioDeltaLegacy:
                 {
                     string delta = (string)e["delta"];
+                    string responseId = (string)e["response_id"];
+                    if (responseId != null && m_CancelledResponseIds.Contains(responseId))
+                        break; // a cancelled reply's audio still in flight
                     if (!string.IsNullOrEmpty(delta) && !UserTalking)
                     {
                         m_Ctx?.player?.EnqueueBase64Pcm16(delta);
@@ -558,7 +707,6 @@ namespace SplatPresso.Voice
 
                 case RealtimeEventNames.InputAudioTranscriptionFailed:
                     Debug.LogWarning($"[SplatPresso] Input transcription FAILED: {e.ToString(Formatting.None)}");
-                    ResolvePendingPlacements((string)e["item_id"], null);
                     break;
 
                 case RealtimeEventNames.Error:
@@ -614,9 +762,19 @@ namespace SplatPresso.Voice
             string code = (string)err?["code"];
             string eventId = (string)err?["event_id"];
 
+            string message = (string)err?["message"];
+            bool handled = false;
+            if (code != null && s_FatalErrorCodes.Contains(code))
+            {
+                // the server accepted the socket but rejects the key / model / account: reconnecting would loop
+                Debug.LogWarning($"[SplatPresso] Realtime error: {errText}");
+                m_Socket?.Fail($"OpenAI rejected the session: {(string.IsNullOrEmpty(message) ? code : message)}", RealtimeSocket.FailureKind.Auth);
+                return; // the Failed state change reports it
+            }
             if (!m_FrameSendUnsupported && errText.Contains("input_image"))
             {
                 m_FrameSendUnsupported = true;
+                handled = true;
                 Debug.LogWarning("[SplatPresso] Server rejected input_image; disabling speech-turn snapshots for this session");
             }
             if (m_ResponseRequested && eventId != null && eventId == m_RequestedEventId)
@@ -627,13 +785,28 @@ namespace SplatPresso.Voice
                 m_CancelOnCreated = false;
                 MaybeSendPendingResponse();
             }
-            if (code == "response_cancel_not_active")
+            if (eventId != null && eventId == m_SessionEventId)
             {
-                Debug.Log("[SplatPresso] Realtime: nothing to cancel (the response had already finished)");
+                // The session configuration was rejected (typically an unknown realtimeVoice): without it the session
+                // runs on server defaults (no tools, server VAD). Retry once with the default voice, and tell the user.
+                if (!m_SessionSafeRetried)
+                {
+                    m_SessionSafeRetried = true;
+                    Debug.LogWarning($"[SplatPresso] Realtime session.update rejected ({errText}); retrying with voice 'cedar'");
+                    SendSessionUpdate("cedar");
+                }
+                RaiseError("OpenAI Realtime rejected the session settings: " + (string.IsNullOrEmpty(message) ? errText : message) +
+                           " (check realtimeVoice / realtimeModel in the settings)");
                 return;
             }
+            if (code != null && s_BenignErrorCodes.Contains(code))
+            {
+                Debug.Log($"[SplatPresso] Realtime: {code} (harmless race, ignored)");
+                return;
+            }
+            if (handled)
+                return;
             Debug.LogWarning($"[SplatPresso] Realtime error: {errText}");
-            string message = (string)err?["message"];
             RaiseError("OpenAI Realtime: " + (string.IsNullOrEmpty(message) ? errText : message));
         }
 
@@ -653,7 +826,6 @@ namespace SplatPresso.Voice
             }
             Debug.Log($"[SplatPresso] Heard: \"{transcript}\"");
             Raise(UserTranscript, transcript);
-            ResolvePendingPlacements(itemId, transcript);
         }
 
         // Sends a function_call_output per tool call, then ONE follow-up response.create (two concurrent
@@ -722,49 +894,15 @@ namespace SplatPresso.Voice
             return true;
         }
 
+        // Starts the generation at once. The turn's input transcript often arrives after the tool call; it only labels
+        // the run (sourceUtterance), so it is attached when already known and never waited for (the original also
+        // started immediately).
         void QueuePlacement(PlacementRequest request)
         {
-            if (m_TurnTypedText != null)
-            {
-                RaisePlacement(request, m_TurnTypedText);
-                return;
-            }
-            string itemId = m_TurnItemId;
-            if (itemId == null)
-            {
-                RaisePlacement(request, null);
-                return;
-            }
-            if (m_Transcripts.TryGetValue(itemId, out var transcript))
-            {
-                RaisePlacement(request, transcript);
-                return;
-            }
-            m_PendingPlacements.Add(new PendingPlacement { request = request, itemId = itemId, deadline = Time.unscaledTime + kTranscriptWaitSec });
-        }
-
-        void ResolvePendingPlacements(string itemId, string transcript)
-        {
-            if (string.IsNullOrEmpty(itemId))
-                return;
-            for (int i = 0; i < m_PendingPlacements.Count; i++)
-            {
-                var p = m_PendingPlacements[i];
-                if (p.itemId != itemId)
-                    continue;
-                m_PendingPlacements.RemoveAt(i--);
-                RaisePlacement(p.request, transcript);
-            }
-        }
-
-        void FlushPendingPlacements()
-        {
-            if (m_PendingPlacements.Count == 0)
-                return;
-            var pending = new List<PendingPlacement>(m_PendingPlacements);
-            m_PendingPlacements.Clear();
-            foreach (var p in pending)
-                RaisePlacement(p.request, p.itemId != null && m_Transcripts.TryGetValue(p.itemId, out var t) ? t : null);
+            string source = m_TurnTypedText;
+            if (source == null && m_TurnItemId != null)
+                m_Transcripts.TryGetValue(m_TurnItemId, out source);
+            RaisePlacement(request, source);
         }
 
         void RaisePlacement(PlacementRequest request, string sourceUtterance)

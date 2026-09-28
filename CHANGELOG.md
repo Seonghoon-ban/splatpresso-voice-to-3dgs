@@ -3,6 +3,35 @@
 All notable changes to this package are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-28
+
+음성 대화를 원본 연구 프로젝트처럼 빠르게: OpenAI 키가 있으면 OpenAI Realtime이 기본입니다.
+
+### Changed
+- **`voiceBackend`에 `Auto` 추가, 새 기본값**: OpenAI 키가 있으면 OpenAI Realtime(말을 멈추고 약 1.5초 만에 답변 음성),
+  없으면 GenPresso 음성 에이전트(약 13초). 기존 설정 에셋의 옛 기본값 `GenpressoChat`은 한 번 `Auto`로 옮겨집니다
+  (OpenAI 키가 없으면 동작은 같음). 이후에 직접 고른 값은 그대로 유지됩니다.
+- Realtime: Space를 누르는 순간 화면 스냅샷을 찍어 두고, 떼면 기다리지 않고 바로 응답을 요청합니다.
+- Realtime: 생성 요청을 입력 음성 받아쓰기를 기다리지 않고 도구 호출 즉시 시작합니다(최대 2초 지연 제거).
+- Realtime: 세션 설정(지시·도구·push-to-talk)이 적용된 뒤에만 준비 상태가 됩니다. 설정이 거부되면 기본 목소리로 한 번 다시 보냅니다.
+- Realtime 연결: 네트워크 오류는 계속 재연결(1–15초 → 30초 간격), 15초 연결 타임아웃, 응답이 없는 죽은 연결 감지.
+  키 거부(401/403), 모델 접근 불가(404), 할당량 없음, WebSocket 미지원 빌드는 즉시 실패로 판정합니다(Unity 런타임은 거부 상태 코드를
+  알려 주지 않으므로 같은 키로 `GET /v1/models/{model}`을 호출해 원인을 확인).
+- `Auto`에서 Realtime이 실패하면 GenPresso 음성 에이전트로 자동 전환하고 HUD에 이유를 표시합니다.
+- HUD에 동작 중인 음성 에이전트(`Realtime` / `GenPresso voice`)와 재연결 원인을 표시합니다. 무해한 서버 경합 오류는 HUD에 띄우지 않습니다.
+- `replyLanguage = Auto`: 진행 상황 안내도 사용자가 마지막으로 말한 언어로 말합니다.
+- Test Connection이 OpenAI 키와 Realtime 모델 접근 권한을 확인하고, 실제로 쓰일 음성 에이전트를 표시합니다. Validate Project도 표시합니다.
+- 플레이 중에 키를 저장·삭제하면 음성 에이전트가 바로 전환됩니다.
+
+### Fixed
+- **플레이어 빌드(Managed Stripping High)에서 Realtime이 연결되지 않던 문제**: `System.Configuration.ExeConfigurationHost` 등
+  TLS 핸드셰이크가 이름으로 만드는 타입이 제거됐습니다. 빌드 시 link.xml에 보존합니다(라이브 플레이어로 확인).
+- 첫 연결이 한 번 실패한 뒤 성공하면 "재연결"로 처리해 새 세션에 잘못된 안내를 넣던 문제.
+
+### Added
+- `OpenAIRealtimeBackend.EndpointOverride`(테스트·프록시용), `RealtimeSocket.ClassifyConnectError` / `InterpretModelProbe` / `ModelProbeUrl`,
+  `VoiceAgent.ResolveBackend`. 모의 WebSocket 서버로 Realtime 백엔드를 검사하는 테스트.
+
 ## [0.2.0] - 2026-09-28
 
 실사용 테스트 피드백(대기 시간, 한국어 인식, 음성 답변)을 반영했습니다.

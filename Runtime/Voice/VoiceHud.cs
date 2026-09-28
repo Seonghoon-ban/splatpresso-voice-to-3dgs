@@ -576,9 +576,19 @@ namespace SplatPresso.Voice
                 Fill(rect, new Color(0.15f, 0.15f, 0.15f, 0.75f));
                 if (voiceAgent.ActiveBackend == VoiceBackendKind.OpenAIRealtime)
                 {
-                    bool failed = voiceAgent.RealtimeBackend != null && voiceAgent.RealtimeBackend.HasFailed;
+                    var rt = voiceAgent.RealtimeBackend;
+                    bool failed = rt != null && rt.HasFailed;
+                    string sub;
+                    if (failed)
+                        sub = rt.FailureKind == RealtimeSocket.FailureKind.Auth ? "Check the OpenAI key and model"
+                            : rt.FailureKind == RealtimeSocket.FailureKind.Runtime ? "No WebSocket support in this build"
+                            : "Connection failed";
+                    else if (rt != null && rt.IsReconnecting && !string.IsNullOrEmpty(rt.LastSocketError))
+                        sub = "Reconnecting: " + Truncate(rt.LastSocketError, 42);
+                    else
+                        sub = "OpenAI Realtime";
                     GUI.Label(titleRect, failed ? "Voice agent offline" : "Connecting voice agent...", m_TitleStyle);
-                    GUI.Label(subRect, failed ? "Check the OpenAI key and model" : "OpenAI Realtime", m_SmallStyle);
+                    GUI.Label(subRect, sub, m_SmallStyle);
                 }
                 else
                 {
@@ -614,11 +624,15 @@ namespace SplatPresso.Voice
             else
             {
                 GUI.Label(titleRect, voiceAgent.CanTalk ? $"Hold [{ptt}] to talk" : "No microphone", m_TitleStyle);
-                string sub = JoinHints(typeHint, micHint);
+                // which voice agent answers: fast Realtime, or the GenPresso chat + TTS path
+                string backendTag = voiceAgent.ActiveBackend == VoiceBackendKind.OpenAIRealtime ? "Realtime" : "GenPresso voice";
+                string sub = JoinHints(backendTag, JoinHints(typeHint, micHint));
                 GUI.Label(subRect, sub, m_SmallStyle);
             }
             return y;
         }
+
+        static string Truncate(string s, int max) => s == null || s.Length <= max ? s : s.Substring(0, max - 3) + "...";
 
         static string JoinHints(string a, string b)
         {
