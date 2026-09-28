@@ -1,0 +1,9 @@
+# Keep text normalized to LF in the repository; Unity reads either line ending.
+* text=auto eol=lf
+# Binary assets and fixtures
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ply binary
+*.glb binary
+*.dll binary
