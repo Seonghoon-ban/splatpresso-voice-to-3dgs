@@ -1,0 +1,19 @@
+{
+  "camera_unchanged": true,
+  "unexpected_changes": "",
+  "objects": [
+    {
+      "id": 1,
+      "name": "red chair",
+      "found": true,
+      "bbox_norm": [
+        0.4398,
+        0.4597,
+        0.1203,
+        0.4
+      ],
+      "fully_visible": true,
+      "notes": ""
+    }
+  ]
+}

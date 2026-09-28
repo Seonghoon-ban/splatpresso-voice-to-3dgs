@@ -1,0 +1,10 @@
+# Unity .meta files are part of the package and must stay tracked.
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc

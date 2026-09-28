@@ -1,0 +1,40 @@
+{
+  "name": "com.splatpresso.voice-to-3dgs",
+  "version": "0.1.0",
+  "displayName": "SplatPresso Voice To 3DGS",
+  "description": "Talk to an agent and it adds generated 3D Gaussian Splat objects that fit your scene. The agent hears your voice and sees your view, plans what to add and where, edits the view to match the scene, isolates the object, turns it into a gaussian splat with TripoSplat and places it at the right position and scale using the scene depth. Everything runs through a single GenPresso API key. aras-p's UnityGaussianSplatting renderer is installed automatically on first import (Git required, OpenUPM fallback). Requires URP with Render Graph and D3D12, Vulkan or Metal.",
+  "unity": "6000.0",
+  "license": "MIT",
+  "author": {
+    "name": "Seonghoon Ban"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs.git"
+  },
+  "documentationUrl": "https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs#readme",
+  "changelogUrl": "https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs/blob/main/LICENSE.md",
+  "keywords": [
+    "ai",
+    "generative",
+    "3d",
+    "gaussian-splatting",
+    "3dgs",
+    "voice",
+    "agent",
+    "genpresso",
+    "triposplat"
+  ],
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "17.0.3",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.burst": "1.8.8",
+    "com.unity.collections": "2.1.4",
+    "com.unity.mathematics": "1.2.6",
+    "com.unity.modules.audio": "1.0.0",
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0"
+  }
+}

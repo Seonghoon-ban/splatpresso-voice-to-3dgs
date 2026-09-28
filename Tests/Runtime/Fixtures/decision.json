@@ -1,0 +1,22 @@
+{
+  "scene_summary": "A living room with a wooden floor, a beige back wall with a window, a small wooden table on the right and a potted plant on the left.",
+  "feasible": true,
+  "infeasible_reason": null,
+  "objects": [
+    {
+      "id": 1,
+      "name": "red chair",
+      "description_for_image_edit": "a red wooden chair with a tall solid backrest, matte paint, lit by the soft window light",
+      "description_for_segmentation": "red chair",
+      "target_bbox_norm": [
+        0.4398,
+        0.4597,
+        0.1203,
+        0.4
+      ],
+      "size_hint_m": 0.9,
+      "resting_surface": "ground"
+    }
+  ],
+  "edit_prompt": "Add a red wooden chair with a tall solid backrest standing on the floor in the middle of the room, left of the wooden table. Keep everything else exactly the same: same camera angle, same framing, same lighting, same photographic style. Do not modify or remove any existing content."
+}

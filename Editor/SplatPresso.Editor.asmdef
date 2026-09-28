@@ -1,0 +1,42 @@
+{
+    "name": "SplatPresso.Editor",
+    "rootNamespace": "SplatPresso.EditorTools",
+    "references": [
+        "SplatPresso.Runtime",
+        "GaussianSplatting",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Core.Editor",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.RenderPipelines.Universal.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "SPLATPRESSO_HAS_GS",
+        "SPLATPRESSO_HAS_URP"
+    ],
+    "versionDefines": [
+        {
+            "name": "org.nesnausk.gaussian-splatting",
+            "expression": "1.0.0",
+            "define": "SPLATPRESSO_HAS_GS"
+        },
+        {
+            "name": "com.unity.render-pipelines.universal",
+            "expression": "17.0.0",
+            "define": "SPLATPRESSO_HAS_URP"
+        },
+        {
+            "name": "com.unity.cloud.gltfast",
+            "expression": "6.0.0",
+            "define": "SPLATPRESSO_HAS_GLTFAST"
+        }
+    ],
+    "noEngineReferences": false
+}

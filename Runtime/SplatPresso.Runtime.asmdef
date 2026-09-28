@@ -1,0 +1,41 @@
+{
+    "name": "SplatPresso.Runtime",
+    "rootNamespace": "SplatPresso",
+    "references": [
+        "GaussianSplatting",
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Mathematics",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "SPLATPRESSO_HAS_GS",
+        "SPLATPRESSO_HAS_URP"
+    ],
+    "versionDefines": [
+        {
+            "name": "org.nesnausk.gaussian-splatting",
+            "expression": "1.0.0",
+            "define": "SPLATPRESSO_HAS_GS"
+        },
+        {
+            "name": "com.unity.render-pipelines.universal",
+            "expression": "17.0.0",
+            "define": "SPLATPRESSO_HAS_URP"
+        },
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "1.4.0",
+            "define": "SPLATPRESSO_INPUTSYSTEM"
+        }
+    ],
+    "noEngineReferences": false
+}

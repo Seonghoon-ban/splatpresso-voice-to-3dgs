@@ -1,0 +1,37 @@
+{
+    "name": "SplatPresso.Mesh",
+    "rootNamespace": "SplatPresso.Mesh",
+    "references": [
+        "SplatPresso.Runtime",
+        "glTFast"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "SPLATPRESSO_HAS_GS",
+        "SPLATPRESSO_HAS_URP",
+        "SPLATPRESSO_HAS_GLTFAST"
+    ],
+    "versionDefines": [
+        {
+            "name": "org.nesnausk.gaussian-splatting",
+            "expression": "1.0.0",
+            "define": "SPLATPRESSO_HAS_GS"
+        },
+        {
+            "name": "com.unity.render-pipelines.universal",
+            "expression": "17.0.0",
+            "define": "SPLATPRESSO_HAS_URP"
+        },
+        {
+            "name": "com.unity.cloud.gltfast",
+            "expression": "6.0.0",
+            "define": "SPLATPRESSO_HAS_GLTFAST"
+        }
+    ],
+    "noEngineReferences": false
+}
