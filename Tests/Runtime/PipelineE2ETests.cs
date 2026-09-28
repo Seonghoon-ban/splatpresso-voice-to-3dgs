@@ -15,8 +15,8 @@ namespace SplatPresso.Tests
     /// <summary>
     /// Whole pipeline runs against the mock server in a real URP scene: capture -> DECIDE -> (edit -> depth ->
     /// VERIFY -> segment -> enhance) -> TripoSplat -> download -> placement -> a spawned splat. The tests run in
-    /// order: the second one checks that the image-to-splat path resolved by the first (after the 404
-    /// fall-through) is reused from the cache.
+    /// order: the second one checks that the image-to-splat path resolved by the first (after the wrong first
+    /// candidate's job FAILED with 404 and the client fell through) is reused from the cache.
     /// </summary>
     public class PipelineE2ETests : MockServerFixture
     {
@@ -154,9 +154,13 @@ namespace SplatPresso.Tests
             var splatSubmits = Mock.Find(r => r.kind == "submit" && r.capability == "splat", mark);
             Assert.AreEqual(2, splatSubmits.Count, Mock.Describe(mark));
             Assert.AreEqual("tripo3d/triposplat", splatSubmits[0].target);
-            Assert.AreEqual(404, splatSubmits[0].status);
-            Assert.AreEqual("gp/tripo3d/triposplat", splatSubmits[1].target);
-            Assert.AreEqual("gp/tripo3d/triposplat", ModelPathCache.Get(Mock.ApiBaseUrl, MediaRouteKeys.ImageToSplat));
+            Assert.AreEqual(200, splatSubmits[0].status, "GenPresso accepts a wrong model path at submit");
+            var missing = Mock.Find(r => r.kind == "result" && r.requestId == splatSubmits[0].requestId, mark);
+            Assert.AreEqual(1, missing.Count, Mock.Describe(mark));
+            Assert.AreEqual(404, missing[0].status, "the job FAILED with 'Path /triposplat not found'");
+            Assert.AreEqual("gp/triposplat", splatSubmits[1].target);
+            Assert.AreEqual(200, splatSubmits[1].status);
+            Assert.AreEqual("gp/triposplat", ModelPathCache.Get(Mock.ApiBaseUrl, MediaRouteKeys.ImageToSplat));
 
             var editSubmits = Mock.Find(r => r.kind == "submit" && r.capability == "edit", mark);
             Assert.GreaterOrEqual(editSubmits.Count, 2, Mock.Describe(mark));
@@ -214,11 +218,11 @@ namespace SplatPresso.Tests
             if (m_SceneContextualPassed)
             {
                 Assert.AreEqual(1, splatSubmits.Count, "the cached path is tried first:\n" + Mock.Describe(mark));
-                Assert.AreEqual("gp/tripo3d/triposplat", splatSubmits[0].target);
+                Assert.AreEqual("gp/triposplat", splatSubmits[0].target);
             }
             else
             {
-                Assert.AreEqual("gp/tripo3d/triposplat", splatSubmits.Last().target, Mock.Describe(mark));
+                Assert.AreEqual("gp/triposplat", splatSubmits.Last().target, Mock.Describe(mark));
             }
             Assert.IsEmpty(m_Failures, FailureText());
         }

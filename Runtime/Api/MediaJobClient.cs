@@ -185,10 +185,33 @@ namespace SplatPresso.Api
                     continue;
                 }
 
-                ModelPathCache.Set(baseUrl, routeKey, path, paths);
                 m_Ledger?.Record(costLabel, route.estimatedCost);
                 var urls = ResolveJobUrls(sub.json, path, true, auth);
-                var result = await PollAndFetchAsync(urls, auth, path, route.timeoutSec, onStatus, ct);
+                JObject result;
+                try
+                {
+                    result = await PollAndFetchAsync(urls, auth, path, route.timeoutSec, onStatus, ct);
+                }
+                catch (GenpressoException e) when (e.IsMissingModelPath)
+                {
+                    // GenPresso accepts any gp/... path at submit and only reports a wrong model path once the job
+                    // runs (FAILED, result 404 "Path /x not found"). Not billed: undo the estimate, try the next path.
+                    m_Ledger?.Record(costLabel + " (not billed: model path not found)", -route.estimatedCost);
+                    tried.Add(path);
+                    lastMissingDetail = e.Message;
+                    if (string.Equals(path, cached, StringComparison.OrdinalIgnoreCase))
+                        ModelPathCache.Invalidate(baseUrl, routeKey);
+                    Debug.Log($"[SplatPresso] GenPresso media path '{path}' ({routeKey}) does not exist ({e.Message}); trying the next candidate");
+                    continue;
+                }
+                catch (GenpressoException e) when (e.Kind == GenpressoErrorKind.Validation)
+                {
+                    // The model exists (it validated the input); only this input was rejected.
+                    ModelPathCache.Set(baseUrl, routeKey, path, paths);
+                    throw;
+                }
+                // Cache only a path that proved to exist: a submit can be accepted for a path that does not.
+                ModelPathCache.Set(baseUrl, routeKey, path, paths);
                 return new MediaJobResult { result = result, resolvedPath = path, provider = MediaProvider.Genpresso, requestId = urls.requestId };
             }
 
@@ -310,6 +333,23 @@ namespace SplatPresso.Api
                 // 401/402/403/413/other: fail now (402 = balance below the media minimum).
                 throw GenpressoException.FromHttp($"{service} submit to {path}", code, resp.Text, resp.Error, resp.RetryAfterSec);
             }
+        }
+
+        // Result of a FAILED job whose model path does not exist, e.g. {"detail":"Path /triposplat not found"} or
+        // {"detail":"Application \"x\" not found"} (observed on live GenPresso for gp/tripo3d/triposplat), or the
+        // OpenAI-style {"error":{"message":"unknown model: x","code":"model_not_found"}} that GenPresso uses at submit.
+        internal static bool LooksLikeMissingModelPath(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return false;
+            string t = text.ToLowerInvariant();
+            if (t.Contains("request"))
+                return false;
+            if (t.Contains("model_not_found") || t.Contains("unknown model"))
+                return true;
+            if (!t.Contains("not found"))
+                return false;
+            return t.Contains("path") || t.Contains("application") || t.Contains("model") || t.Contains("endpoint") || t.Contains("app ");
         }
 
         // A 404 (JSON or the web app's HTML page) means the path is not hosted; a 400 whose message says the model is
@@ -520,6 +560,90 @@ namespace SplatPresso.Api
             return new TimeoutException($"[SplatPresso] Media job {path} exceeded {timeoutSec}s {phase} (request {urls.requestId ?? "?"}).");
         }
 
+        // Follows an accepted probe job to its terminal status and classifies it from the result body.
+        static async Awaitable<ProbeResult> FollowProbeJobAsync(SplatPressoSettings s, ProbeResult result, string submitText, string auth,
+            Dictionary<string, string> headers, int maxWaitSec, CancellationToken ct)
+        {
+            string statusUrl = null, responseUrl = null, cancelUrl = null;
+            try
+            {
+                var json = JObject.Parse(submitText ?? "");
+                string id = json["request_id"]?.ToString();
+                statusUrl = (string)json["status_url"];
+                responseUrl = (string)json["response_url"];
+                cancelUrl = (string)json["cancel_url"];
+                if (!string.IsNullOrEmpty(id))
+                {
+                    if (string.IsNullOrEmpty(statusUrl)) statusUrl = s.ApiUrl($"media/requests/{id}/status");
+                    if (string.IsNullOrEmpty(responseUrl)) responseUrl = s.ApiUrl($"media/requests/{id}");
+                    if (string.IsNullOrEmpty(cancelUrl)) cancelUrl = s.ApiUrl($"media/requests/{id}/cancel");
+                }
+            }
+            catch (JsonException) { }
+            if (string.IsNullOrEmpty(statusUrl) || string.IsNullOrEmpty(responseUrl))
+            {
+                result.outcome = ProbeOutcome.Error;
+                result.message = "accepted, but the submit response had no polling URLs";
+                return result;
+            }
+
+            double deadline = Time.realtimeSinceStartupAsDouble + Mathf.Max(10, maxWaitSec);
+            string state = null;
+            while (Time.realtimeSinceStartupAsDouble < deadline)
+            {
+                await HttpJson.DelayAsync(3f, ct);
+                HttpResponse st;
+                try { st = await HttpJson.SendAsync("GET", statusUrl, null, null, headers, kPollTimeoutSec, ct, throwOnHttpError: false); }
+                catch (GenpressoException) { continue; }
+                if (!st.IsSuccess)
+                    continue;
+                try { state = ((string)JObject.Parse(st.Text ?? "")["status"])?.ToUpperInvariant(); }
+                catch (JsonException) { continue; }
+                if (state == "COMPLETED" || IsTerminalFailure(state))
+                    break;
+                state = null;
+            }
+            if (state == null)
+            {
+                TryCancelFireAndForget(cancelUrl, auth);
+                result.outcome = ProbeOutcome.Error;
+                result.message = $"still queued after {maxWaitSec}s (inconclusive; the probe job was cancelled)";
+                return result;
+            }
+
+            HttpResponse res;
+            try { res = await HttpJson.SendAsync("GET", responseUrl, null, null, headers, kFetchTimeoutSec, ct, throwOnHttpError: false); }
+            catch (GenpressoException e)
+            {
+                result.outcome = ProbeOutcome.Error;
+                result.message = $"{state}; the result could not be read: {e.Message}";
+                return result;
+            }
+            result.statusCode = res.StatusCode;
+            string reason = GenpressoError.Parse(res.Text) ?? GenpressoError.Truncate(res.Text, 200);
+            if (res.StatusCode == 404 && LooksLikeMissingModelPath(reason ?? res.Text))
+            {
+                result.outcome = ProbeOutcome.Missing;
+                result.message = "not hosted (" + reason + ")";
+            }
+            else if (res.StatusCode == 422 || res.StatusCode == 400)
+            {
+                result.outcome = ProbeOutcome.Present;
+                result.message = "exists (probe input rejected as expected)";
+            }
+            else if (res.IsSuccess || state == "COMPLETED")
+            {
+                result.outcome = ProbeOutcome.Present;
+                result.message = "exists (" + state + ")";
+            }
+            else
+            {
+                result.outcome = ProbeOutcome.Error;
+                result.message = $"{state}: {GenpressoError.Describe(res.StatusCode, res.Error, res.Text)}";
+            }
+            return result;
+        }
+
         static bool IsTerminalFailure(string state)
         {
             switch (state)
@@ -561,6 +685,8 @@ namespace SplatPresso.Api
             }
 
             string msg = $"Media job {path} ended with status {state}" + (string.IsNullOrEmpty(reason) ? "" : ": " + reason);
+            if (reasonStatus == 404 && LooksLikeMissingModelPath(reason ?? reasonBody))
+                return new GenpressoException(msg, GenpressoErrorKind.NotFound, 404, reasonBody, retryable: false) { IsMissingModelPath = true };
             bool validation = reasonStatus >= 400 && reasonStatus < 500 && reasonStatus != 408 && reasonStatus != 429;
             if (validation)
                 return new GenpressoException(msg, GenpressoErrorKind.Validation, reasonStatus, reasonBody, retryable: false);
@@ -606,11 +732,14 @@ namespace SplatPresso.Api
         }
 
         /// <summary>
-        /// Checks whether a GenPresso media path exists WITHOUT running a job: posts a body that fails validation
-        /// for every supported model. 404 = missing; 2xx or 422 = present (a 2xx job is cancelled immediately).
+        /// Checks whether a GenPresso media path exists WITHOUT running a real job: posts a body that fails validation
+        /// for every supported model (failed jobs are not billed). A 404 at submit = missing. GenPresso accepts any
+        /// <c>gp/...</c> path at submit and validates asynchronously, so an accepted probe is followed to its terminal
+        /// status: result 422 = present (the model rejected the probe input), result 404 "path/application not found" =
+        /// missing. A probe still queued after <paramref name="maxWaitSec"/> is cancelled and reported as Error.
         /// Needs a key (and, per GenPresso, at least 10 credits of balance). Works in edit mode.
         /// </summary>
-        public static async Awaitable<ProbeResult> ProbeAsync(SplatPressoSettings s, string path, CancellationToken ct)
+        public static async Awaitable<ProbeResult> ProbeAsync(SplatPressoSettings s, string path, CancellationToken ct, int maxWaitSec = 300)
         {
             s = s != null ? s : SplatPressoSettings.Active;
             var result = new ProbeResult { path = (path ?? "").Trim().Trim('/') };
@@ -638,21 +767,7 @@ namespace SplatPresso.Api
 
             result.statusCode = resp.StatusCode;
             if (resp.IsSuccess)
-            {
-                result.outcome = ProbeOutcome.Present;
-                result.message = "accepted (cancelled immediately)";
-                try
-                {
-                    var json = JObject.Parse(resp.Text ?? "");
-                    string id = json["request_id"]?.ToString();
-                    string cancel = (string)json["cancel_url"];
-                    if (string.IsNullOrEmpty(cancel) && !string.IsNullOrEmpty(id))
-                        cancel = s.ApiUrl($"media/requests/{id}/cancel");
-                    TryCancelFireAndForget(cancel, auth);
-                }
-                catch { /* nothing to cancel */ }
-                return result;
-            }
+                return await FollowProbeJobAsync(s, result, resp.Text, auth, headers, maxWaitSec, ct);
 
             if (IsMissingPath(resp.StatusCode, resp.Text))
             {

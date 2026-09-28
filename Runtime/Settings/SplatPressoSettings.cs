@@ -239,7 +239,7 @@ namespace SplatPresso
                 case MediaRouteKeys.Depth:
                     return new ModelRoute(new[] { "gp/image-preprocessors/depth-anything/v2" }, "fal-ai/image-preprocessors/depth-anything/v2", 0.2f, 60);
                 case MediaRouteKeys.ImageToSplat:
-                    return new ModelRoute(new[] { "tripo3d/triposplat", "gp/tripo3d/triposplat", "gp/triposplat" }, "tripo3d/triposplat", 1.5f, 300);
+                    return new ModelRoute(new[] { "tripo3d/triposplat", "gp/triposplat" }, "tripo3d/triposplat", 1.5f, 600);
                 case MediaRouteKeys.ImageToMesh:
                     return new ModelRoute(new[] { "gp/hyper3d/rodin/v2.5/fast", "gp/hyper3d/rodin/v2.5" }, "fal-ai/hyper3d/rodin/v2.5/fast", 3.0f, 600);
                 case MediaRouteKeys.TextToMesh:

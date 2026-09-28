@@ -27,7 +27,7 @@
 12. [문제 해결](#문제-해결)
 13. [스크립트 API](#스크립트-api)
 14. [제한 사항](#제한-사항)
-15. [검증 상태](#검증-상태-010)
+15. [검증 상태](#검증-상태-011)
 16. [패키지 구조](#패키지-구조)
 17. [크레딧 & 라이선스](#크레딧--라이선스)
 
@@ -64,13 +64,15 @@
   완성되면 실제 스플랫으로 바뀝니다.
 - 배치는 **캡처 시점의 카메라 포즈**를 기준으로 계산하므로, 생성되는 동안 카메라를 움직여도 결과 위치는 바뀌지 않습니다.
 - 모든 단계의 입력·출력은 세션 폴더에 저장되어 **임의의 단계부터 다시 실행**할 수 있습니다(이미 끝난 단계는 재과금 없음).
-- 소요 시간: Scene-aware 약 60~150초, Direct 약 30~90초 (객체 1~3개 기준).
+- 소요 시간 (실측, 객체 1개): 이미지 단계(판단·편집·검증·분할·다듬기) 약 45초 + TripoSplat.
+  TripoSplat이 이미 워밍돼 있으면 수십 초(Direct 전체 38초), **콜드 스타트/대기열이면 수 분**(실측 6분 25초)이 걸릴 수 있습니다.
+  그래서 TripoSplat 타임아웃 기본값은 600초입니다.
 
 ## 요구 사항
 
 | 항목 | 내용 |
 |---|---|
-| Unity | **6000.0 이상** (0.1.0은 **6000.0.63f1 (URP 17.0.4)** 과 **6000.2.6f2 (URP 17.2)**, Windows D3D12에서 검증) |
+| Unity | **6000.0 이상** (0.1.x는 **6000.0.63f1 (URP 17.0.4)** 과 **6000.2.6f2 (URP 17.2)**, Windows D3D12에서 검증) |
 | 렌더 파이프라인 | **URP 17 + Render Graph** (Compatibility Mode 꺼짐). Built-in 프로젝트는 Setup이 URP 에셋을 만들어 줍니다. |
 | 그래픽 API | Windows **D3D12 / Vulkan**, macOS **Metal**. DX11·OpenGL에서는 스플랫이 렌더링되지 않습니다. |
 | Gaussian Splatting 렌더러 | **1.1.0 이상, 2.0 미만** (1.1.0은 Render Graph를 지원하는 첫 버전; 호환이 확인되지 않은 2.x는 안전하게 비활성화). 없으면 부트스트랩이 고정 커밋을 설치합니다(아래). |
@@ -88,7 +90,7 @@ Unity 에디터에서 `Window > Package Manager` → `+` → **Add package from 
 https://github.com/Seonghoon-ban/splatpresso-voice-to-3dgs.git
 ```
 
-버전을 고정하려면 뒤에 `#v0.1.0`처럼 태그를 붙입니다.
+버전을 고정하려면 뒤에 `#v0.1.1`처럼 태그를 붙입니다.
 
 **설치하면 이렇게 진행됩니다.**
 
@@ -325,7 +327,7 @@ M/N 단축키는 `SplatPressoRoot.enableModeHotkeys`로 끌 수 있고, 현재 �
 | 객체 분할 | `segment` | `gp/sam-3/image` → `gp/sam-3-1/image` | `fal-ai/sam-3/image` | 0.2 | 60 s |
 | 배경 제거 (분할 실패 시) | `removeBackground` | `gp/birefnet/v2` → `gp/birefnet` | `fal-ai/birefnet/v2` | 0.1 | 60 s |
 | 상대 depth | `depth` | `gp/image-preprocessors/depth-anything/v2` | `fal-ai/image-preprocessors/depth-anything/v2` | 0.2 | 60 s |
-| 이미지→스플랫 | `imageToSplat` | `tripo3d/triposplat` → `gp/tripo3d/triposplat` → `gp/triposplat` | `tripo3d/triposplat` | 1.5 | 300 s |
+| 이미지→스플랫 | `imageToSplat` | `tripo3d/triposplat` → `gp/triposplat` | `tripo3d/triposplat` | 1.5 | 600 s |
 | 이미지→메시 | `imageToMesh` | `gp/hyper3d/rodin/v2.5/fast` → `gp/hyper3d/rodin/v2.5` | `fal-ai/hyper3d/rodin/v2.5/fast` | 3.0 | 600 s |
 | 텍스트→메시 | `textToMesh` | `gp/hyper3d/rodin/v2.5/text-to-3d/fast` | `fal-ai/hyper3d/rodin/v2.5/text-to-3d/fast` | 3.0 | 600 s |
 
@@ -338,14 +340,21 @@ M/N 단축키는 `SplatPressoRoot.enableModeHotkeys`로 끌 수 있고, 현재 �
 - `fal-ai/`가 아닌 다른 소유자의 모델(`google/…`, `tripo3d/…`, `bytedance/…`, `openai/…`)은 **이름 그대로** 씁니다.
   예: TripoSplat은 `tripo3d/triposplat`.
 - GenPresso에 `fal-ai/…`를 그대로 보내면 404입니다.
+- **실제 GenPresso에서 확인한 경로 (2026-09-28)**: 위 표의 모든 기본 후보가 존재합니다. TripoSplat은 `tripo3d/triposplat`(별칭 `gp/triposplat`)이며,
+  규칙대로라면 나올 법한 `gp/tripo3d/triposplat`은 **존재하지 않습니다**. TripoSplat은 큐 대기가 몇 분 걸릴 수 있어 타임아웃을 600초로 둡니다.
 
 **자동 해석과 캐시**
 
 - GenPresso 미디어 카탈로그는 키 없이는 조회할 수 없어서, 일부 경로(TripoSplat 등)는 위 규칙으로 도출한 **후보**입니다.
   그래서 경로를 하나로 고정하지 않고 후보 목록을 순서대로 시도합니다.
-- 제출 시 404(또는 "모델 없음" 류의 400)면 다음 후보로 넘어갑니다. 404는 큐에 들어가지 않으므로 **과금되지 않습니다.**
-- 처음 성공한 경로는 `<persistentDataPath>/SplatPresso/model_paths.json`에 7일간 캐시되어 다음부터 바로 사용됩니다.
-- **Test + Probe Media Models** 버튼(Project Settings)은 모든 후보에 일부러 검증에 실패하는 요청을 보내 어떤 경로가 존재하는지 보여줍니다.
+- GenPresso는 `gp/…` 경로를 **제출 시점에는 거의 다 받아들이고**, 잘못된 경로나 잘못된 입력은 작업이 실행된 뒤에야
+  `FAILED`로 알려줍니다(결과 조회 시 404 `Path … not found` 또는 422 검증 오류). 그래서 두 경우 모두 처리합니다:
+  - 제출 시 404(예: `Application "x" not found`, `unknown model`) → 다음 후보.
+  - 작업 후 `FAILED` + 404 경로 없음 → 다음 후보 (실패한 작업은 과금되지 않으므로 원장의 예상 비용도 되돌립니다).
+  - 작업 후 `FAILED` + 422 → 모델은 존재하고 입력만 잘못된 것이므로 재제출하지 않고 오류로 보고합니다.
+- **실제로 동작이 확인된 경로만** `<persistentDataPath>/SplatPresso/model_paths.json`에 7일간 캐시되어 다음부터 바로 사용됩니다.
+- **Test + Probe Media Models** 버튼(Project Settings)은 모든 후보에 일부러 검증에 실패하는 요청을 보내고, 작업이 끝날 때까지
+  (TripoSplat은 대기열 때문에 몇 분 걸릴 수 있음) 기다린 뒤 결과로 존재 여부를 판단합니다. 모든 후보를 동시에 확인합니다.
   검증 실패 요청은 과금되지 않지만, 잔액 10크레딧 이상이 필요합니다.
 - 경로를 바꾸려면 해당 라우트의 `genpressoPaths` 목록을 수정하세요. 원하는 경로를 맨 앞에 두면 됩니다.
 
@@ -521,16 +530,16 @@ depth 캡처는 자체 URP 렌더 패스와 셰이더로 하며, 렌더러 내�
 1.1.0 이상인데 이 필드가 없으면(내부 구조가 바뀐 버전·포크) 시작 시와 **Validate Project** 에서 `GaussianSplatting version mismatch` 오류를 냅니다.
 런타임 스플랫 에셋은 렌더러의 공개 API(`GaussianSplatAsset`)로 만듭니다.
 
-## 검증 상태 (0.1.0)
+## 검증 상태 (0.1.1)
 
 | 항목 | 결과 |
 |---|---|
 | 빈 프로젝트에 git URL 한 줄 설치 → 부트스트랩이 렌더러 자동 설치 → 컴파일 | 6000.0.63f1, 6000.2.6f2 모두 통과 (에러·경고 0) |
-| EditMode 테스트 (Bbox, 배치 수학, PLY→런타임 에셋, upstream 임포터와 바이트 단위 레이아웃 비교, 키 해석, 에러 파싱 등) | 95/95 통과 |
-| PlayMode 테스트 (실제 GPU 렌더 + RGB/depth 캡처, 모의 GenPresso 서버로 Scene-aware·Direct·Mesh 전체 파이프라인, 음성 텍스트 턴) | 18/18 통과 (Input System 전용 프로젝트 포함) |
+| EditMode 테스트 (Bbox, 배치 수학, PLY→런타임 에셋, upstream 임포터와 바이트 단위 레이아웃 비교, 키 해석, 에러 파싱 등) | 96/96 통과 |
+| PlayMode 테스트 (실제 GPU 렌더 + RGB/depth 캡처, 실제 GenPresso 동작을 재현한 모의 서버로 Scene-aware·Direct·Mesh 전체 파이프라인, 음성 텍스트 턴) | 20/20 통과 (Input System 전용 프로젝트 포함) |
 | Windows 플레이어 빌드 (Mono, Managed Stripping High) | 런타임 에셋·리플렉션 브리지·캡처·전체 파이프라인(모의 서버) 정상 |
-| 실제 GenPresso API 호출 | **미검증** — 모의 서버는 문서화된 규약과 meshpresso에서 확인한 특이 동작을 재현합니다. 처음 사용할 때 **Project Settings > SplatPresso > Test + Probe Media Models** 로 모델 경로(특히 TripoSplat)를 확인하세요. |
-| 실제 마이크 음성 턴 / OpenAI Realtime | 코드 경로와 WebSocket은 로컬에서 검증, 실제 서비스 호출은 미검증 |
+| 실제 GenPresso API (0.1.1) | **통과** — 플레이어 빌드(Stripping High)에서 한국어 요청 "소파 옆 바닥에 빨간 캠핑 의자 하나 놔줘" → Gemini 음성 턴 → Scene-aware 전체 파이프라인 → TripoSplat 스플랫이 소파 옆 바닥에 배치(약 4.5크레딧 추정), Direct 모드 화분 배치(약 2.8크레딧 추정, 38초). chat의 `json_schema` + 이미지 + `input_audio` 동시 입력, 모든 기본 미디어 경로 존재 확인. |
+| 실제 마이크 음성 턴 / OpenAI Realtime | GenPresso로 오디오+이미지 입력은 확인. 사람이 말하는 마이크 턴과 OpenAI Realtime 실서비스 호출은 미검증 |
 
 ## 패키지 구조
 

@@ -3,6 +3,24 @@
 All notable changes to this package are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-28
+
+실제 GenPresso API로 전 과정을 검증하면서 발견한 문제를 고쳤습니다.
+
+### Fixed
+- **플레이어 빌드에서 음성 턴이 모두 실패하던 문제**: Managed Stripping(High/IL2CPP)이 JSON 응답 타입(`VoiceTurnResponse` 등)의
+  기본 생성자를 제거해 역직렬화가 실패했습니다. 빌드 시 생성하는 link.xml이 SplatPresso 런타임 어셈블리를 보존합니다.
+- **잘못된 GenPresso 경로 처리**: GenPresso는 `gp/...` 경로를 제출 시점에 거의 다 받아들이고, 없는 경로는 작업 실행 후
+  `FAILED` + 404 `Path ... not found`로 알려줍니다. 이제 이 경우도 다음 후보로 넘어가고(과금 안 됨, 원장 추정치도 되돌림),
+  실제로 동작이 확인된 경로만 캐시합니다.
+- **Test + Probe Media Models**: 제출 수락만으로 "존재"라고 판단하던 것을, 작업이 끝날 때까지 기다려 결과(422 = 존재, 404 = 없음)로
+  판단하도록 바꿨고, 모든 후보를 동시에 확인합니다.
+
+### Changed
+- TripoSplat 후보 경로: `tripo3d/triposplat` → `gp/triposplat` (실측으로 확인; `gp/tripo3d/triposplat`은 존재하지 않아 제거).
+- TripoSplat 타임아웃 300초 → 600초 (콜드 스타트/대기열로 6분 이상 걸린 사례 실측).
+- 테스트용 모의 서버가 실제 GenPresso의 비동기 검증·경로 오류·취소 응답을 그대로 재현합니다.
+
 ## [0.1.0] - 2026-09-28
 
 첫 배포 버전. 연구용 프로토타입(음성 에이전트 기반 장면 인식 Gaussian Splat 생성·배치)을

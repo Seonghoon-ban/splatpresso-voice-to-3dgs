@@ -49,6 +49,12 @@ namespace SplatPresso.Api
         public bool Retryable { get; }
         /// <summary>Seconds requested by a Retry-After header (0 when absent).</summary>
         public float RetryAfterSec { get; }
+        /// <summary>
+        /// True when the media job failed because its model path does not exist. GenPresso accepts any <c>gp/...</c>
+        /// path at submit and only reports a wrong path once the job runs (FAILED, result 404 "Path ... not found").
+        /// Such jobs are not billed; <see cref="MediaJobClient"/> falls through to the next candidate path.
+        /// </summary>
+        public bool IsMissingModelPath { get; set; }
 
         public GenpressoException(string message, GenpressoErrorKind kind, long statusCode = 0, string responseBody = null,
             bool? retryable = null, float retryAfterSec = 0f, Exception inner = null)

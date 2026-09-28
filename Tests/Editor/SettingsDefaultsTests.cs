@@ -74,9 +74,12 @@ namespace SplatPresso.Tests
         public void Routes_HaveTheVerifiedPathsInOrder()
         {
             var s = m_Settings;
-            Assert.AreEqual(new[] { "tripo3d/triposplat", "gp/tripo3d/triposplat", "gp/triposplat" }, s.imageToSplat.genpressoPaths);
+            // live: gp/tripo3d/triposplat is accepted at submit but its job FAILS with 404 "Path /triposplat not found";
+            // TripoSplat lives at tripo3d/triposplat (aliased as gp/triposplat)
+            Assert.AreEqual(new[] { "tripo3d/triposplat", "gp/triposplat" }, s.imageToSplat.genpressoPaths);
             Assert.AreEqual("tripo3d/triposplat", s.imageToSplat.falEndpoint);
-            Assert.AreEqual(300, s.imageToSplat.timeoutSec);
+            Assert.AreEqual(1.5f, s.imageToSplat.estimatedCost);
+            Assert.AreEqual(600, s.imageToSplat.timeoutSec);
             Assert.AreEqual("google/nano-banana-2-lite/edit", s.edit.genpressoPaths[0]);
             Assert.AreEqual("gp/sam-3/image", s.segment.genpressoPaths[0]);
             Assert.AreEqual("gp/birefnet/v2", s.removeBackground.genpressoPaths[0]);

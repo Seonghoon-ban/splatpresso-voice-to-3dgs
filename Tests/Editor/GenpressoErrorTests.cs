@@ -1,3 +1,4 @@
+using System.Reflection;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SplatPresso.Api;
@@ -125,6 +126,31 @@ namespace SplatPresso.Tests
 
             var forced = GenpressoException.FromHttp("fetch", 503, null, null, retryable: false);
             Assert.IsFalse(forced.Retryable, "an explicit retryable flag wins (a paid job must never be re-submitted)");
+        }
+
+        [Test]
+        public void LooksLikeMissingModelPath_TellsAWrongModelPathFromOtherFailures()
+        {
+            // internal to SplatPresso.Runtime (no InternalsVisibleTo), so reached by reflection
+            var method = typeof(MediaJobClient).GetMethod("LooksLikeMissingModelPath", BindingFlags.NonPublic | BindingFlags.Static,
+                null, new[] { typeof(string) }, null);
+            Assert.NotNull(method, "MediaJobClient.LooksLikeMissingModelPath(string) was renamed or removed");
+            bool Looks(string text) => (bool)method.Invoke(null, new object[] { text });
+
+            // result of a FAILED job whose model path does not exist (live: gp/tripo3d/triposplat)
+            Assert.IsTrue(Looks("Path /triposplat not found"));
+            Assert.IsTrue(Looks("Application \"google\" not found"));
+            Assert.IsTrue(Looks("unknown model: fal-ai/sam-3/image not found"));
+            Assert.IsTrue(Looks("ENDPOINT /x NOT FOUND"), "case-insensitive");
+
+            // a missing request/job is not a missing model; neither is a validation failure
+            Assert.IsFalse(Looks("Request not found"));
+            Assert.IsFalse(Looks("Request req_123 for path /triposplat not found"));
+            Assert.IsFalse(Looks("body.image_url: Field required"));
+            Assert.IsFalse(Looks("body.box_prompts.0.x_min: Input should be a valid integer, got a number with a fractional part"));
+            Assert.IsFalse(Looks("Could not download the image"));
+            Assert.IsFalse(Looks(""));
+            Assert.IsFalse(Looks(null));
         }
     }
 }

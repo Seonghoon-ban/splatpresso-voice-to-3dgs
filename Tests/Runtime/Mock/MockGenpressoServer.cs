@@ -23,10 +23,18 @@ namespace SplatPresso.Tests
         /// <c>chat:other</c>, <c>models</c>, <c>submit</c>, <c>status</c>, <c>result</c>, <c>cancel</c>, <c>file</c>, <c>unknown</c>.
         /// </summary>
         public string kind;
-        /// <summary>Media model path of a submit (e.g. <c>gp/tripo3d/triposplat</c>), or the file name of a download.</summary>
+        /// <summary>
+        /// Media model path of a submit (e.g. <c>gp/triposplat</c>), the job id of a status/result/cancel request, or
+        /// the file name of a download.
+        /// </summary>
         public string target;
         /// <summary>Capability the submit was classified as (edit, enhance, t2i, segment, rembg, depth, splat, mesh-image, mesh-text).</summary>
         public string capability;
+        /// <summary>
+        /// Job id: the job an accepted submit created (null when the submit was rejected, i.e. nothing was queued), or
+        /// the job a status/result/cancel request addressed. Correlates a submit with its status polls and result fetches.
+        /// </summary>
+        public string requestId;
         public int status;
         public bool hadAuthorization;
         public int bodyBytes;
@@ -34,22 +42,35 @@ namespace SplatPresso.Tests
         /// <summary>Seconds since the server started.</summary>
         public double time;
 
-        public override string ToString() => $"#{index} {method} {path} -> {status} [{kind}{(string.IsNullOrEmpty(capability) ? "" : ":" + capability)}]";
+        public override string ToString() =>
+            $"#{index} {method} {path} -> {status} [{kind}{(string.IsNullOrEmpty(capability) ? "" : ":" + capability)}]" +
+            (kind == "submit" && requestId != null ? " => " + requestId : "");
     }
 
     /// <summary>
     /// In-process stand-in for the GenPresso API (chat + media queue) on <c>http://127.0.0.1:&lt;free port&gt;/</c>,
-    /// used by the PlayMode tests. It serves the synthetic fixtures as model outputs and reproduces the queue quirks
-    /// the client must survive:
+    /// used by the PlayMode tests. It serves the synthetic fixtures as model outputs and mirrors the media-queue
+    /// behaviour observed on the live API (https://genpresso.ai/api/v1), including the quirks the client must survive:
     /// <list type="bullet">
-    /// <item>the first TripoSplat candidate path (<c>tripo3d/triposplat</c>) answers 404 JSON (not hosted), the
-    ///   next one (<c>gp/tripo3d/triposplat</c>) works;</item>
-    /// <item>the first image-edit submit answers 429 with <c>Retry-After: 1</c>;</item>
-    /// <item>each job reports IN_QUEUE once before COMPLETED;</item>
+    /// <item>submit only rejects unknown applications: <c>fal-ai/...</c> answers 404
+    ///   <c>{"error":{"message":"unknown model: ...","code":"model_not_found",...}}</c>, an owner other than
+    ///   <c>gp/ google/ tripo3d/ bytedance/ openai/ minimax/</c> (or a path in <see cref="SubmitMissingPaths"/>) answers
+    ///   404 <c>{"detail":"Application \"x\" not found"}</c>. Every other path, including a wrong <c>gp/...</c> sub-path,
+    ///   is accepted with 200 <c>{request_id,status_url,response_url,cancel_url}</c>;</item>
+    /// <item>validation is asynchronous: an invalid input (the probe body, a fractional SAM-3 box, a missing required
+    ///   field) is accepted at submit, then the job reports FAILED and its result is 422 with a FastAPI detail list;</item>
+    /// <item>a wrong model path is only revealed once the job runs: a path in <see cref="AsyncMissingPaths"/> (live:
+    ///   <c>tripo3d/triposplat</c>, <c>gp/tripo3d/triposplat</c>) or a path of no known model reports FAILED and its result
+    ///   is 404 <c>{"detail":"Path /triposplat not found"}</c>. The working TripoSplat path is <c>gp/triposplat</c>;</item>
+    /// <item>a job that fails (validation or missing path) reports FAILED on its first status poll, so a probe settles
+    ///   after one poll;</item>
+    /// <item>cancel (PUT cancel_url) answers 202 <c>{"request_id":..,"status":"CANCELED"}</c> while the job is queued
+    ///   (its status then reports EXPIRED) and 400 with the same body once the job is terminal;</item>
+    /// <item>the first VALID image-edit submit answers 429 with <c>Retry-After: 1</c> (probes do not consume it);</item>
+    /// <item>each successful job reports IN_QUEUE once before COMPLETED;</item>
     /// <item>the first result fetch after COMPLETED answers 200 <c>{"detail":"Request is still in progress"}</c> once;</item>
-    /// <item>submit/status/result/cancel URLs are returned in the submit body (clients must use them verbatim);</item>
-    /// <item>inputs are validated like fal does (422 FastAPI detail), incl. integer SAM-3 box prompts and the 4 MB
-    ///   body cap (plain-text 413).</item>
+    /// <item>status/result/cancel URLs are returned in the submit body (clients must use them verbatim);</item>
+    /// <item>bodies above 4 MB get the hosting layer's plain-text 413 at submit.</item>
     /// </list>
     /// Chat requests are answered by inspecting the system prompt / schema name: DECIDE -> decision.json,
     /// VERIFY -> verification.json, voice turns -> a "create red chair" action. Every request is recorded.
@@ -61,6 +82,9 @@ namespace SplatPresso.Tests
         public const string ApiKey = "gp_test";
 
         const int kMaxBody = 4000000;
+
+        /// <summary>Path owners GenPresso routes (anything else is rejected at submit).</summary>
+        static readonly string[] kKnownOwners = { "gp", "google", "tripo3d", "bytedance", "openai", "minimax" };
 
         readonly string m_FixturesDir;
         readonly HttpListener m_Listener;
@@ -77,17 +101,22 @@ namespace SplatPresso.Tests
 
         // ---- scenario knobs (set before the requests they affect) ----
 
-        /// <summary>Media path that answers 404 "not hosted" (null = none).</summary>
-        public string MissingSplatPath = "tripo3d/triposplat";
-        /// <summary>Answer the first image-edit submit with 429 + Retry-After: 1.</summary>
+        /// <summary>
+        /// Paths (case-insensitive) that are ACCEPTED at submit, then the job reports FAILED and its result is 404
+        /// <c>{"detail":"Path /x not found"}</c> (live behaviour of a wrong model path). A path listed here never succeeds.
+        /// </summary>
+        public HashSet<string> AsyncMissingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tripo3d/triposplat", "gp/tripo3d/triposplat" };
+        /// <summary>Paths (case-insensitive) that answer 404 <c>{"detail":"Application \"x\" not found"}</c> at submit (nothing queued).</summary>
+        public HashSet<string> SubmitMissingPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Answer the first valid image-edit submit with 429 + Retry-After: 1.</summary>
         public bool RateLimitFirstEditSubmit = true;
-        /// <summary>How many status polls report IN_QUEUE before COMPLETED.</summary>
+        /// <summary>How many status polls a successful job reports IN_QUEUE before COMPLETED.</summary>
         public int InQueuePolls = 1;
         /// <summary>Answer the first result fetch after COMPLETED with 200 "still in progress" (once per server).</summary>
         public bool InProgressOnceAfterCompleted = true;
         /// <summary>Keep every new job IN_QUEUE forever (cancellation / timeout tests).</summary>
         public bool HoldJobsInQueue;
-        /// <summary>The next accepted job ends FAILED and its result is a 422 validation error.</summary>
+        /// <summary>The next job that would otherwise succeed ends FAILED and its result is a 422 validation error.</summary>
         public bool FailNextJob;
 
         sealed class Job
@@ -96,9 +125,13 @@ namespace SplatPresso.Tests
             public string modelPath;
             public string capability;
             public JObject result;
+            /// <summary>0 = the job succeeds; else the HTTP status of its result once it FAILED (404 / 422).</summary>
+            public int failStatus;
+            public JObject failBody;
             public int polls;
             public bool completed;
-            public bool failed;
+            /// <summary>The status endpoint reported COMPLETED or FAILED.</summary>
+            public bool terminal;
             public bool hold;
             public bool cancelled;
         }
@@ -475,104 +508,155 @@ namespace SplatPresso.Tests
         {
             rec.kind = "submit";
             rec.target = modelPath;
-            JObject input;
+            JObject input = null;
             try
             {
                 input = JObject.Parse(Encoding.UTF8.GetString(body));
             }
             catch (JsonException)
             {
-                return Json(422, Detail("body", "Input should be a valid JSON object"));
+                // answered below, once the path is known to exist
             }
 
-            string capability = Classify(modelPath, input);
+            string capability = Classify(modelPath, input ?? new JObject());
+            // Tag the record before rejecting anything so tests can see the fall-through per capability.
             rec.capability = capability;
-            // Tag the record before answering "not hosted" so tests can see the fall-through per capability.
-            if (MissingSplatPath != null && string.Equals(modelPath, MissingSplatPath, StringComparison.OrdinalIgnoreCase))
-                return Json(404, OpenAIError($"Model '{modelPath}' not found", "not_found", "invalid_request_error"));
-            if (capability == null)
-                return Json(404, OpenAIError($"Model '{modelPath}' not found", "not_found", "invalid_request_error"));
 
-            // probes (and any other validation failure) are rejected at submit, like a real existing path
-            JObject invalid = Validate(capability, input);
-            if (invalid != null)
-                return Json(422, invalid);
+            // Submit only knows applications: an unknown one is rejected here (404, nothing queued or billed).
+            string owner = Segments(modelPath)[0].ToLowerInvariant();
+            if (owner == "fal-ai")
+                return Json(404, OpenAIError("unknown model: " + modelPath, "model_not_found", "invalid_request_error"));
+            bool submitMissing;
+            lock (m_Lock)
+                submitMissing = SubmitMissingPaths != null && SubmitMissingPaths.Contains(modelPath);
+            if (Array.IndexOf(kKnownOwners, owner) < 0 || submitMissing)
+                return Json(404, new JObject { ["detail"] = $"Application \"{ApplicationOf(modelPath)}\" not found" });
+            if (input == null)
+                return Json(422, Detail("json_invalid", "Input should be a valid JSON object"));
 
+            // Everything else is accepted; a wrong model path or an invalid input only shows once the job runs.
+            int failStatus = 0;
+            JObject failBody = null;
+            bool asyncMissing;
+            lock (m_Lock)
+                asyncMissing = AsyncMissingPaths != null && AsyncMissingPaths.Contains(modelPath);
+            if (asyncMissing || capability == null)
+            {
+                failStatus = 404;
+                failBody = new JObject { ["detail"] = MissingPathDetail(modelPath) };
+            }
+            else
+            {
+                failBody = Validate(capability, input);
+                if (failBody != null)
+                    failStatus = 422;
+            }
+
+            Job job;
             lock (m_Lock)
             {
-                if (capability == "edit" && RateLimitFirstEditSubmit && !m_Edit429Sent)
+                if (failStatus == 0 && capability == "edit" && RateLimitFirstEditSubmit && !m_Edit429Sent)
                 {
                     m_Edit429Sent = true;
                     var r = Json(429, OpenAIError("Too many concurrent media requests", "rate_limited", "rate_limit_error"));
                     r.retryAfter = "1";
                     return r;
                 }
-            }
-
-            var job = new Job
-            {
-                id = "req_" + Interlocked.Increment(ref m_NextJob).ToString("D4") + "_" + capability,
-                modelPath = modelPath,
-                capability = capability,
-                result = ResultFor(capability),
-            };
-            lock (m_Lock)
-            {
-                job.hold = HoldJobsInQueue;
-                job.failed = FailNextJob;
-                FailNextJob = false;
+                if (failStatus == 0 && FailNextJob)
+                {
+                    FailNextJob = false;
+                    failStatus = 422;
+                    failBody = Detail("value_error", "Could not download the image", "image_url");
+                }
+                job = new Job
+                {
+                    id = "req_" + (++m_NextJob).ToString("D4") + "_" + (capability ?? "unknown"),
+                    modelPath = modelPath,
+                    capability = capability,
+                    result = failStatus == 0 ? ResultFor(capability) : null,
+                    failStatus = failStatus,
+                    failBody = failBody,
+                    hold = HoldJobsInQueue,
+                };
                 m_Jobs[job.id] = job;
             }
+            rec.requestId = job.id;
             string baseUrl = ApiBaseUrl + "/media/requests/" + job.id;
             return Json(200, new JObject
             {
                 ["request_id"] = job.id,
-                ["status"] = "IN_QUEUE",
-                ["queue_position"] = 0,
                 ["status_url"] = baseUrl + "/status",
                 ["response_url"] = baseUrl,
                 ["cancel_url"] = baseUrl + "/cancel",
             });
         }
 
+        static string[] Segments(string modelPath) => (modelPath ?? "").Split('/');
+
+        // The application a path addresses: the owner, or the segment after gp/ (live: gp/google/... -> "google").
+        static string ApplicationOf(string modelPath)
+        {
+            var s = Segments(modelPath);
+            return s[0].Equals("gp", StringComparison.OrdinalIgnoreCase) && s.Length > 1 ? s[1] : s[0];
+        }
+
+        // Result detail of a job whose model path does not exist (live: tripo3d/triposplat and gp/tripo3d/triposplat
+        // both answer "Path /triposplat not found"; a bare application answers "Application ... not found").
+        static string MissingPathDetail(string modelPath)
+        {
+            var s = Segments(modelPath);
+            int app = s[0].Equals("gp", StringComparison.OrdinalIgnoreCase) && s.Length > 1 ? 1 : 0;
+            string rest = string.Join("/", s, app + 1, s.Length - app - 1);
+            return rest.Length == 0 ? $"Application \"{s[app]}\" not found" : $"Path /{rest} not found";
+        }
+
+        // FastAPI/pydantic-style validation of the fields each model requires. The connection tester's probe body
+        // ({"output_format":"__probe__","tier":"__probe__"}) lacks them all, like on the live API.
         static JObject Validate(string capability, JObject input)
         {
-            if (input.ToString(Formatting.None).Contains("__probe__"))
-                return Detail("output_format", "Input should be 'png', 'jpeg' or 'ply'");
             bool Has(string key) => input[key] != null && input[key].Type == JTokenType.String && ((string)input[key]).Length > 0;
             bool HasList(string key) => input[key] is JArray a && a.Count > 0 && a[0].Type == JTokenType.String;
             switch (capability)
             {
                 case "edit":
                 case "enhance":
-                    if (!Has("prompt")) return Detail("prompt", "Field required");
-                    if (!HasList("image_urls")) return Detail("image_urls", "Field required");
-                    return null;
+                    if (!Has("prompt")) return Missing("prompt");
+                    if (!HasList("image_urls")) return Missing("image_urls");
+                    break;
                 case "t2i":
                 case "mesh-text":
-                    return Has("prompt") ? null : Detail("prompt", "Field required");
+                    if (!Has("prompt")) return Missing("prompt");
+                    break;
                 case "segment":
-                    if (!Has("image_url")) return Detail("image_url", "Field required");
+                    if (!Has("image_url")) return Missing("image_url");
                     if (input["box_prompts"] is JArray boxes)
-                        foreach (var b in boxes)
+                        for (int i = 0; i < boxes.Count; i++)
                             foreach (var k in new[] { "x_min", "y_min", "x_max", "y_max" })
-                                if (b[k] == null || b[k].Type != JTokenType.Integer)
-                                    return Detail("box_prompts." + k, "Input should be a valid integer");
-                    return null;
+                            {
+                                var v = (boxes[i] as JObject)?[k];
+                                if (v == null)
+                                    return Detail("missing", "Field required", "box_prompts", i, k);
+                                if (v.Type != JTokenType.Integer)
+                                    return Detail("int_from_float", "Input should be a valid integer, got a number with a fractional part", "box_prompts", i, k);
+                            }
+                    break;
                 case "rembg":
                 case "depth":
-                    return Has("image_url") ? null : Detail("image_url", "Field required");
+                    if (!Has("image_url")) return Missing("image_url");
+                    break;
                 case "splat":
-                    if (!Has("image_url")) return Detail("image_url", "Field required");
+                    if (!Has("image_url")) return Missing("image_url");
                     var n = input["num_gaussians"];
                     if (n != null && (n.Type != JTokenType.Integer || (long)n < 32768 || (long)n > 262144))
-                        return Detail("num_gaussians", "Input should be between 32768 and 262144");
-                    return null;
+                        return Detail("less_than_equal", "Input should be between 32768 and 262144", "num_gaussians");
+                    break;
                 case "mesh-image":
-                    return HasList("image_urls") || HasList("input_image_urls") ? null : Detail("image_urls", "Field required");
-                default:
-                    return null;
+                    if (!HasList("image_urls") && !HasList("input_image_urls")) return Missing("image_urls");
+                    break;
             }
+            if (input.ToString(Formatting.None).Contains("__probe__"))
+                return Detail("literal_error", "Input should be 'png', 'jpeg' or 'ply'", "output_format");
+            return null;
         }
 
         JObject ResultFor(string capability)
@@ -622,21 +706,31 @@ namespace SplatPresso.Tests
             lock (m_Lock)
                 m_Jobs.TryGetValue(parts[0], out job);
             rec.target = parts[0];
+            rec.requestId = parts[0];
+            if (job != null)
+                rec.capability = job.capability;
             if (parts.Length == 2 && parts[1] == "cancel")
             {
                 rec.kind = "cancel";
                 if (rec.method != "PUT")
                     return Json(405, OpenAIError("Method not allowed", "method_not_allowed", "invalid_request_error"));
-                if (job != null)
-                    lock (m_Lock) job.cancelled = true;
-                return Json(job != null ? 200 : 404, new JObject { ["status"] = job != null ? "CANCELLATION_REQUESTED" : "NOT_FOUND" });
+                if (job == null)
+                    return Json(404, new JObject { ["detail"] = "Request not found" });
+                lock (m_Lock)
+                {
+                    // live: 202 while queued (the status then reports EXPIRED), 400 with the same body once terminal
+                    var reply = new JObject { ["request_id"] = job.id, ["status"] = "CANCELED" };
+                    if (job.terminal || job.cancelled)
+                        return Json(400, reply);
+                    job.cancelled = true;
+                    return Json(202, reply);
+                }
             }
             if (job == null)
             {
                 rec.kind = parts.Length == 2 ? "status" : "result";
                 return Json(404, OpenAIError("Request not found", "not_found", "invalid_request_error"));
             }
-            rec.capability = job.capability;
 
             if (parts.Length == 2 && parts[1] == "status")
             {
@@ -644,20 +738,29 @@ namespace SplatPresso.Tests
                 lock (m_Lock)
                 {
                     if (job.cancelled)
-                        return Json(200, new JObject { ["status"] = "CANCELED" });
+                        return Json(200, new JObject { ["status"] = "EXPIRED" });
+                    if (job.hold)
+                        return Json(200, new JObject { ["status"] = "IN_QUEUE", ["queue_position"] = 0 });
+                    if (job.failStatus != 0)
+                    {
+                        // a wrong path / invalid input fails as soon as a worker picks the job up
+                        job.terminal = true;
+                        return Json(200, new JObject { ["status"] = "FAILED" });
+                    }
                     job.polls++;
-                    if (job.hold || job.polls <= InQueuePolls)
+                    if (job.polls <= InQueuePolls)
                         return Json(200, new JObject { ["status"] = "IN_QUEUE", ["queue_position"] = Math.Max(0, InQueuePolls - job.polls) });
                     job.completed = true;
-                    return Json(200, new JObject { ["status"] = job.failed ? "FAILED" : "COMPLETED" });
+                    job.terminal = true;
+                    return Json(200, new JObject { ["status"] = "COMPLETED" });
                 }
             }
 
             rec.kind = "result";
             lock (m_Lock)
             {
-                if (job.failed)
-                    return Json(422, Detail("image_url", "Could not download the image"));
+                if (job.failStatus != 0)
+                    return Json(job.failStatus, job.failBody);
                 if (!job.completed)
                     return Json(200, new JObject { ["detail"] = "Request is still in progress" });
                 if (InProgressOnceAfterCompleted && !m_InProgressSent)
@@ -709,9 +812,18 @@ namespace SplatPresso.Tests
         static JObject OpenAIError(string message, string code, string type) =>
             new JObject { ["error"] = new JObject { ["message"] = message, ["code"] = code, ["type"] = type } };
 
-        static JObject Detail(string field, string message) => new JObject
+        // FastAPI validation body: {"detail":[{"type":..,"loc":["body",..],"msg":..}]}
+        static JObject Detail(string type, string message, params object[] loc)
         {
-            ["detail"] = new JArray(new JObject { ["loc"] = new JArray("body", field), ["msg"] = message, ["type"] = "value_error" }),
-        };
+            var path = new JArray("body");
+            foreach (var part in loc)
+                path.Add(JToken.FromObject(part));
+            return new JObject
+            {
+                ["detail"] = new JArray(new JObject { ["type"] = type, ["loc"] = path, ["msg"] = message }),
+            };
+        }
+
+        static JObject Missing(string field) => Detail("missing", "Field required", field);
     }
 }

@@ -176,6 +176,15 @@ namespace SplatPresso.Api
             if (probeMediaModels && r.hasKey && r.reachable)
             {
                 r.lines.Add("Media model paths:");
+                // GenPresso validates media jobs asynchronously, so a probe waits for its job to fail (possibly after
+                // queueing). Start all probes at once (Awaitables run as soon as they are created), await in order.
+                var started = new Dictionary<string, Awaitable<ProbeResult>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in s.EnumerateRoutes())
+                    if (kv.Value != null)
+                        foreach (var path in kv.Value.CleanPaths())
+                            if (!started.ContainsKey(path))
+                                started[path] = MediaJobClient.ProbeAsync(s, path, ct);
+                var finished = new Dictionary<string, ProbeResult>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in s.EnumerateRoutes())
                 {
                     if (kv.Value == null)
@@ -186,7 +195,8 @@ namespace SplatPresso.Api
                     foreach (var path in paths)
                     {
                         ct.ThrowIfCancellationRequested();
-                        var probe = await MediaJobClient.ProbeAsync(s, path, ct);
+                        if (!finished.TryGetValue(path, out var probe))
+                            finished[path] = probe = await started[path];
                         r.probes.Add(probe);
                         r.lines.Add($"  {kv.Key}: {probe}");
                         if (probe.Present && !resolved)
